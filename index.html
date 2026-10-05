@@ -407,12 +407,13 @@ function hhmm(s){s=normTime(s);return s?`${s.slice(0,2)}:${s.slice(2)}`:''}
 function fmtMin(m){if(!m)return '0分';return m>=60?`${Math.floor(m/60)}h${m%60?m%60+'m':''}`:`${m}m`}
 function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function escAttr(s){return esc(s)}
 
-if('serviceWorker' in navigator && location.protocol.startsWith('http')){window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));}
+if('serviceWorker' in navigator && location.protocol.startsWith('http')){window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js',{updateViaCache:'none'}).then(r=>r.update()).catch(()=>{}));}
 save();
 ensureMonthLifecycle();
 render();
 setTimeout(maybeOpenWeeklyReport,220);
 
 </script>
+  <script src="./fix-v08.js"></script>
 </body>
 </html>

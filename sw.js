@@ -1,30 +1,14 @@
-const CACHE = 'task-city-github-v2';
-const PATCH_SCRIPT = './fix-v08.js';
+const CACHE = 'task-city-github-v3';
 const CORE = [
   './',
   './index.html',
   './manifest.webmanifest',
+  './fix-v08.js',
   './assets/hh.png',
   './assets/hl.png',
   './assets/lh.png',
-  './assets/ll.png',
-  PATCH_SCRIPT
+  './assets/ll.png'
 ];
-
-async function injectPatch(response) {
-  const text = await response.text();
-  const injected = text.includes('fix-v08.js')
-    ? text
-    : text.replace('</body>', `<script src="${PATCH_SCRIPT}"></script></body>`);
-  const headers = new Headers(response.headers);
-  headers.set('content-type', 'text/html; charset=utf-8');
-  headers.delete('content-length');
-  return new Response(injected, {
-    status: response.status,
-    statusText: response.statusText,
-    headers
-  });
-}
 
 self.addEventListener('install', event => {
   event.waitUntil(
@@ -43,32 +27,30 @@ self.addEventListener('activate', event => {
 });
 
 self.addEventListener('fetch', event => {
-  if (event.request.mode === 'navigate') {
-    event.respondWith((async () => {
-      try {
-        const response = await fetch(event.request, { cache: 'no-store' });
-        const copy = response.clone();
-        caches.open(CACHE).then(cache => cache.put('./index.html', copy));
-        return injectPatch(response);
-      } catch (e) {
-        const cached = await caches.match('./index.html');
-        if (cached) return injectPatch(cached);
-        throw e;
-      }
-    })());
+  const req = event.request;
+
+  if (req.mode === 'navigate') {
+    event.respondWith(
+      fetch(req, {cache:'no-store'})
+        .then(response => {
+          const copy = response.clone();
+          caches.open(CACHE).then(cache => cache.put('./index.html', copy));
+          return response;
+        })
+        .catch(() => caches.match('./index.html'))
+    );
     return;
   }
 
-  // Network first so uploaded fixes are picked up; cache remains the offline fallback.
   event.respondWith(
-    fetch(event.request)
+    fetch(req, {cache:'no-store'})
       .then(response => {
         if (response && response.ok) {
           const copy = response.clone();
-          caches.open(CACHE).then(cache => cache.put(event.request, copy));
+          caches.open(CACHE).then(cache => cache.put(req, copy));
         }
         return response;
       })
-      .catch(() => caches.match(event.request))
+      .catch(() => caches.match(req))
   );
 });
