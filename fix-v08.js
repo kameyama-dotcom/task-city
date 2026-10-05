@@ -679,3 +679,745 @@
   render();
   console.info(`[Task City] patch ${PATCH_VERSION_V10} loaded`);
 })();
+/* === v0.11 : editable title + one-level parent/child tasks === */
+(() => {
+  const PATCH_VERSION_V11 = '0.11.0';
+
+  const style = document.createElement('style');
+  style.textContent = `
+    .task-title-edit{
+      width:100%;
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:12px 13px;
+      background:var(--surface);
+      color:var(--ink);
+      font-size:20px;
+      line-height:1.35;
+      font-weight:950;
+    }
+    .task-title-edit:focus{
+      outline:3px solid rgba(25,197,199,.17);
+      border-color:#19c5c7;
+    }
+    .relation-box{
+      border:1px solid var(--line);
+      border-radius:16px;
+      padding:13px;
+      background:#f8fcfb;
+    }
+    .relation-head{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+      margin-bottom:8px;
+    }
+    .relation-head b{font-size:14px}
+    .relation-link{
+      width:100%;
+      border:1px solid var(--line);
+      background:#fff;
+      border-radius:12px;
+      padding:10px 11px;
+      color:var(--ink);
+      text-align:left;
+      font-weight:850;
+    }
+    .relation-list{
+      display:flex;
+      flex-direction:column;
+      gap:7px;
+      margin-top:9px;
+    }
+    .relation-row{
+      width:100%;
+      display:grid;
+      grid-template-columns:minmax(0,1fr) auto;
+      gap:8px;
+      align-items:center;
+      border:1px solid var(--line);
+      background:#fff;
+      border-radius:12px;
+      padding:10px 11px;
+      color:var(--ink);
+      text-align:left;
+    }
+    .relation-row b{
+      min-width:0;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+      font-size:13px;
+    }
+    .relation-row span{
+      color:var(--muted);
+      font-size:11px;
+      white-space:nowrap;
+    }
+    .child-parent-meta{
+      color:#43848a!important;
+      font-weight:850;
+    }
+    .parent-chip{
+      display:flex;
+      align-items:center;
+      gap:7px;
+      margin:0 0 11px;
+      padding:9px 11px;
+      border:1px solid #bfe7e6;
+      background:#effbfb;
+      border-radius:12px;
+      color:#236a6e;
+      font-size:12px;
+      font-weight:850;
+    }
+    .parent-zero{
+      border-radius:12px;
+      background:#f3f6f6;
+      padding:10px 12px;
+      color:var(--muted);
+      font-size:12px;
+      font-weight:800;
+    }
+    .parent-picker-list{
+      display:flex;
+      flex-direction:column;
+      gap:7px;
+      max-height:52dvh;
+      overflow-y:auto;
+      -webkit-overflow-scrolling:touch;
+      margin-top:12px;
+    }
+    .parent-picker-btn{
+      width:100%;
+      border:1px solid var(--line);
+      background:#fff;
+      color:var(--ink);
+      border-radius:13px;
+      padding:12px;
+      text-align:left;
+      font-weight:850;
+    }
+    .confirm-copy{
+      color:var(--muted);
+      font-size:13px;
+      line-height:1.6;
+      margin:7px 0 14px;
+    }
+    .choice-stack{
+      display:flex;
+      flex-direction:column;
+      gap:9px;
+      margin-top:15px;
+    }
+    .choice-stack button{width:100%}
+    .parent-done-mark{
+      width:62px;
+      height:62px;
+      margin:5px auto 12px;
+      display:grid;
+      place-items:center;
+      border-radius:20px;
+      background:#eafafa;
+      font-size:31px;
+    }
+    @media(max-width:560px){
+      .task-title-edit{font-size:18px}
+      .relation-box{padding:11px}
+    }
+  `;
+  document.head.appendChild(style);
+
+  // Existing task data remains valid. Add only optional fields.
+  state.tasks.forEach(t => {
+    if(!('parentId' in t)) t.parentId = null;
+    if(!('parentPointsBackup' in t)) t.parentPointsBackup = null;
+  });
+
+  const taskByIdV11 = id => state.tasks.find(t => t.id === id);
+  const childrenOfV11 = id => state.tasks.filter(t => t.parentId === id);
+  const unfinishedChildrenV11 = id => childrenOfV11(id).filter(t => !t.completedAt);
+  const hasChildrenV11 = id => childrenOfV11(id).length > 0;
+  const isParentV11 = t => !!t && hasChildrenV11(t.id);
+
+  function parentForV11(t){
+    return t?.parentId ? taskByIdV11(t.parentId) : null;
+  }
+
+  function makeParentV11(parent){
+    if(!parent) return;
+    if(parent.parentPointsBackup == null && Number(parent.points || 0) !== 0){
+      parent.parentPointsBackup = Number(parent.points || 0);
+    }
+    parent.points = 0;
+  }
+
+  function restoreFormerParentPointsV11(parentId){
+    if(!parentId) return;
+    const parent = taskByIdV11(parentId);
+    if(!parent) return;
+    if(!hasChildrenV11(parentId)){
+      if(parent.parentPointsBackup != null) parent.points = parent.parentPointsBackup;
+      parent.parentPointsBackup = null;
+    }else{
+      makeParentV11(parent);
+    }
+  }
+
+  function setParentV11(child, parentId){
+    if(!child) return false;
+    if(hasChildrenV11(child.id)) return false;
+
+    const oldParentId = child.parentId || null;
+    if(parentId){
+      const parent = taskByIdV11(parentId);
+      if(!parent || parent.id === child.id || parent.parentId) return false;
+      child.parentId = parent.id;
+      makeParentV11(parent);
+    }else{
+      child.parentId = null;
+    }
+
+    if(oldParentId && oldParentId !== parentId){
+      restoreFormerParentPointsV11(oldParentId);
+    }
+    save();
+    return true;
+  }
+
+  // A child is still a normal task, so it must also appear in the planning pool.
+  unplanned = function(){
+    return active().filter(t => !t.planDate);
+  };
+
+  // Normal + button always starts a top-level task.
+  const openAddV10 = openAdd;
+  openAdd = function(tag){
+    ui.newChildParentId = null;
+    return openAddV10(tag);
+  };
+
+  function openChildAddV11(parentId){
+    const parent = taskByIdV11(parentId);
+    if(!parent || parent.parentId) return;
+    ui.newChildParentId = parent.id;
+    ui.radial = false;
+    ui.addTag = parent.tag;
+    ui.draft = newDraft(parent.tag);
+    ui.draft.quad = parent.quad;
+    ui.modal = 'add';
+    render();
+    requestAnimationFrame(() => {
+      const el = $('#content');
+      if(el) el.focus();
+    });
+  }
+
+  // Show which parent a newly-created child belongs to.
+  const addModalV10 = addModal;
+  addModal = function(){
+    let html = addModalV10();
+    const parent = ui.newChildParentId ? taskByIdV11(ui.newChildParentId) : null;
+    if(parent){
+      const chip = `<div class="parent-chip">↳ 子タスクとして追加　<b>${esc(parent.content)}</b></div>`;
+      html = html.replace('<div class="field-title">タグ</div>', chip + '<div class="field-title">タグ</div>');
+    }
+    return html;
+  };
+
+  // Create a child with all the same normal task properties.
+  const saveDraftV10 = saveDraft;
+  saveDraft = function(again){
+    const parentId = ui.newChildParentId;
+    if(!parentId) return saveDraftV10(again);
+
+    const parent = taskByIdV11(parentId);
+    const d = ui.draft;
+    if(!parent || !d || !d.content.trim()) return;
+
+    const deadline = parseRawDate(d.dateRaw, d.year);
+    const pts = estimatePoints(d.content);
+    const t = task(
+      d.content.trim(),
+      d.tag,
+      d.quad,
+      deadline,
+      d.timeRaw,
+      '',
+      pts,
+      estimateMinutes(d.content, pts)
+    );
+    t.parentId = parent.id;
+    state.tasks.unshift(t);
+    makeParentV11(parent);
+    save();
+
+    if(again){
+      ui.draft = newDraft(d.tag);
+      ui.draft.quad = d.quad;
+      ui.modal = 'add';
+      render();
+      requestAnimationFrame(() => $('#content')?.focus());
+    }else{
+      ui.newChildParentId = null;
+      ui.modal = null;
+      ui.snack = {text:`${parent.content} に子タスクを追加しました`,id:null};
+      render();
+      setTimeout(() => {
+        if(ui.snack && !ui.snack.id){
+          ui.snack = null;
+          render();
+        }
+      },2200);
+    }
+  };
+
+  function relationHtmlV11(t){
+    const parent = parentForV11(t);
+
+    if(parent){
+      const siblings = unfinishedChildrenV11(parent.id).filter(x => x.id !== t.id);
+      return `<div class="detail-section">
+        <div class="relation-box">
+          <div class="relation-head">
+            <b>親タスク</b>
+            <button id="changeParent" class="ghost">変更</button>
+          </div>
+          <button class="relation-link" data-open-related="${parent.id}">↳ ${esc(parent.content)}</button>
+          ${siblings.length ? `
+            <div class="field-title" style="margin-top:13px">同じ親の未完了タスク</div>
+            <div class="relation-list">
+              ${siblings.map(s => `<button class="relation-row" data-open-related="${s.id}">
+                <b>${esc(s.content)}</b>
+                <span>${s.planDate ? fmt(s.planDate) : '未計画'}</span>
+              </button>`).join('')}
+            </div>` : ''}
+        </div>
+      </div>`;
+    }
+
+    const children = unfinishedChildrenV11(t.id);
+    return `<div class="detail-section">
+      <div class="relation-box">
+        <div class="relation-head">
+          <b>${hasChildrenV11(t.id) ? '子タスク' : '親子タスク'}</b>
+          ${!hasChildrenV11(t.id) ? `<button id="setParent" class="ghost">親を設定</button>` : ''}
+        </div>
+        ${hasChildrenV11(t.id) ? (
+          children.length ? `<div class="relation-list">
+            ${children.map(c => `<button class="relation-row" data-open-related="${c.id}">
+              <b>${esc(c.content)}</b>
+              <span>${c.planDate ? fmt(c.planDate) : '未計画'}</span>
+            </button>`).join('')}
+          </div>` : `<div class="subtle">未完了の子タスクはありません</div>`
+        ) : `<div class="subtle">必要なら、このタスクを親にして1段だけ子タスクを作れます。</div>`}
+        <button id="addChildTask" class="ghost" style="width:100%;margin-top:10px">＋ 子タスクを追加</button>
+      </div>
+    </div>`;
+  }
+
+  // Detail screen: title is now editable. AI breakdown is removed.
+  detailModal = function(){
+    const t = taskByIdV11(ui.detailId);
+    if(!t) return '';
+
+    const parentTask = isParentV11(t);
+
+    return `<div class="modal-backdrop" id="backdrop"><div class="sheet">
+      <div class="field">
+        <div class="field-title">タイトル</div>
+        <input id="taskTitleEdit" class="task-title-edit" value="${escAttr(t.content)}" maxlength="160">
+      </div>
+
+      <div class="tag-pills icon-only">
+        ${Object.entries(TAGS).map(([k,v])=>`<button class="tag-pill ${t.tag===k?'selected':''}" data-tag-edit="${k}">${v.icon} ${esc(v.name)}</button>`).join('')}
+        <button class="tag-pill" id="manageTags">＋ タグ</button>
+      </div>
+
+      <div class="deadline-focus">
+        <div class="deadline-caption">〆切</div>
+        <div class="deadline-big">${t.deadline?fmt(t.deadline):'なし'} ${t.deadlineTime?hhmm(t.deadlineTime):''}</div>
+        <div class="deadline-year">
+          <button class="ghost deadline-year-step" data-y="-1">−</button>
+          <strong>${t.deadline?new Date(t.deadline+'T00:00:00').getFullYear():new Date().getFullYear()}</strong>
+          <button class="ghost deadline-year-step" data-y="1">＋</button>
+        </div>
+        <div class="row">
+          <button class="ghost deadline-step" data-d="-1">−</button>
+          <button class="ghost" id="detailDeadline">${t.deadline?fmt(t.deadline):'なし'}</button>
+          <button class="ghost deadline-step" data-d="1">＋</button>
+          <input id="deadlineTime" class="mini-input" inputmode="numeric" maxlength="4" placeholder="時刻" value="${t.deadlineTime||''}">
+        </div>
+      </div>
+
+      <div class="detail-section">
+        <div class="plan-caption">実行予定日</div>
+        <div class="row">
+          <button class="ghost task-plan-step" data-d="-1">−</button>
+          <button id="detailPlan" class="ghost">${t.planDate?fmt(t.planDate):'未設定'}</button>
+          <button class="ghost task-plan-step" data-d="1">＋</button>
+          <input id="planTime" class="mini-input" inputmode="numeric" maxlength="4" placeholder="時刻" value="${t.planTime||''}">
+        </div>
+        <div class="row" style="margin-top:10px">
+          <span class="subtle">予測</span>
+          <input id="minutes" class="mini-input" inputmode="numeric" value="${t.minutes||''}">
+          <span class="subtle">分</span>
+        </div>
+      </div>
+
+      <div class="detail-section">
+        <div class="field-title">${priorityIcons(t.quad)}　重要度・緊急度</div>
+        ${quadGrid(t.quad)}
+      </div>
+
+      ${relationHtmlV11(t)}
+
+      <div class="detail-section point-area">
+        ${parentTask
+          ? `<div class="parent-zero">親タスクは 0pt（街の成長は子タスクの完了で加算）</div>`
+          : `<div class="subtle">★ AI ${t.points}pt</div>
+             <div class="row wrap" style="margin-top:8px">
+               ${POINTS.map(p=>`<button class="ghost point-edit" data-p="${p}" style="${t.points===p?'background:var(--ink);color:var(--surface)':''}">${p}</button>`).join('')}
+             </div>`}
+      </div>
+
+      <div class="subtle">${new Date(t.createdAt).toLocaleDateString()} ・ ↪ ${t.skips||0}</div>
+
+      ${parentTask && unfinishedChildrenV11(t.id).length===0
+        ? `<button id="completeParentNow" class="primary-btn" style="width:100%;margin-top:14px">✓ 親タスクを完了</button>`
+        : ''}
+
+      <div class="sheet-actions">
+        <button id="deleteTask" class="danger">削除</button>
+        <button id="closeDetail" class="primary-btn">✓</button>
+      </div>
+    </div></div>`;
+  };
+
+  function parentPickerModalV11(){
+    const child = taskByIdV11(ui.parentPickerTaskId);
+    if(!child) return '';
+
+    const candidates = active().filter(t =>
+      t.id !== child.id &&
+      !t.parentId
+    );
+
+    return `<div class="modal-backdrop" id="backdrop"><div class="sheet">
+      <h2>親タスクを設定</h2>
+      <div class="subtle">親子関係は1階層だけです。</div>
+      <div class="parent-picker-list">
+        ${child.parentId ? `<button class="parent-picker-btn" data-parent-choice="">親なしに戻す</button>` : ''}
+        ${candidates.map(p => `<button class="parent-picker-btn" data-parent-choice="${p.id}">
+          ${safeTag(p.tag).icon} ${esc(p.content)}
+        </button>`).join('')}
+        ${!candidates.length && !child.parentId ? `<div class="empty">親にできるタスクがありません</div>` : ''}
+      </div>
+      <div class="sheet-actions"><button id="cancelParentPicker" class="ghost">戻る</button></div>
+    </div></div>`;
+  }
+
+  function deleteParentModalV11(){
+    const parent = taskByIdV11(ui.deleteParentId);
+    if(!parent) return '';
+    const children = childrenOfV11(parent.id);
+    const completed = children.filter(c => c.completedAt).length;
+
+    return `<div class="modal-backdrop" id="backdrop"><div class="sheet">
+      <h2>親タスクを削除</h2>
+      <div class="confirm-copy">
+        「${esc(parent.content)}」には子タスクが${children.length}件あります。
+        ${completed ? `（完了済み${completed}件を含みます）` : ''}
+      </div>
+      <div class="choice-stack">
+        <button id="deleteParentOnly" class="primary-btn">親だけ削除<br><span style="font-size:11px;font-weight:700">子は独立タスクとして残す</span></button>
+        <button id="deleteParentAll" class="danger">親と子をすべて削除</button>
+        <button id="cancelDeleteParent" class="ghost">キャンセル</button>
+      </div>
+    </div></div>`;
+  }
+
+  function parentDoneModalV11(){
+    const parent = taskByIdV11(ui.parentCompleteId);
+    if(!parent) return '';
+
+    return `<div class="modal-backdrop" id="backdrop"><div class="sheet" style="text-align:center">
+      <div class="parent-done-mark">🎉</div>
+      <h2>子タスクがすべて完了しました</h2>
+      <div class="confirm-copy">「${esc(parent.content)}」も完了しますか？</div>
+      <div class="choice-stack">
+        <button id="completeParentYes" class="primary-btn">親も完了する</button>
+        <button id="completeParentNo" class="ghost">まだ完了しない</button>
+      </div>
+    </div></div>`;
+  }
+
+  const modalHtmlV10 = modalHtml;
+  modalHtml = function(){
+    if(ui.modal === 'parentPicker') return parentPickerModalV11();
+    if(ui.modal === 'deleteParent') return deleteParentModalV11();
+    if(ui.modal === 'parentDone') return parentDoneModalV11();
+    return modalHtmlV10();
+  };
+
+  function openRelatedV11(id){
+    if(!taskByIdV11(id)) return;
+    ui.detailId = id;
+    ui.modal = 'detail';
+    render();
+  }
+
+  bindDetail = function(){
+    const t = taskByIdV11(ui.detailId);
+    if(!t) return;
+
+    $('#taskTitleEdit').oninput = e => {
+      const value = e.target.value;
+      if(value.trim()){
+        t.content = value;
+        save();
+      }
+    };
+
+    if($('#manageTags')) $('#manageTags').onclick=()=>openTagSettings('detail');
+
+    $$('[data-tag-edit]').forEach(b=>b.onclick=()=>{
+      t.tag=b.dataset.tagEdit;
+      save();
+      render();
+    });
+
+    $$('[data-quad]').forEach(b=>b.onclick=()=>{
+      t.quad=b.dataset.quad;
+      save();
+      render();
+    });
+
+    $$('.point-edit').forEach(b=>b.onclick=()=>{
+      t.points=Number(b.dataset.p);
+      save();
+      render();
+    });
+
+    $$('.task-plan-step').forEach(b=>b.onclick=()=>{
+      t.planDate=iso(addDays(new Date((t.planDate||today())+'T00:00:00'),Number(b.dataset.d)));
+      save();
+      render();
+    });
+
+    $('#detailPlan').onclick=()=>openDate(t.id);
+
+    $$('.deadline-year-step').forEach(b=>b.onclick=()=>{
+      t.deadline=shiftYearDate(t.deadline||today(),Number(b.dataset.y));
+      save();
+      render();
+    });
+
+    $$('.deadline-step').forEach(b=>b.onclick=()=>{
+      t.deadline=iso(addDays(new Date((t.deadline||today())+'T00:00:00'),Number(b.dataset.d)));
+      save();
+      render();
+    });
+
+    $('#planTime').onchange=e=>{
+      t.planTime=normTime(e.target.value);
+      save();
+    };
+    $('#deadlineTime').onchange=e=>{
+      t.deadlineTime=normTime(e.target.value);
+      save();
+    };
+    $('#minutes').onchange=e=>{
+      t.minutes=Math.max(0,Number(e.target.value)||0);
+      save();
+    };
+
+    $$('[data-open-related]').forEach(b=>b.onclick=()=>openRelatedV11(b.dataset.openRelated));
+
+    if($('#changeParent')) $('#changeParent').onclick=()=>{
+      ui.parentPickerTaskId=t.id;
+      ui.modal='parentPicker';
+      render();
+    };
+
+    if($('#setParent')) $('#setParent').onclick=()=>{
+      ui.parentPickerTaskId=t.id;
+      ui.modal='parentPicker';
+      render();
+    };
+
+    if($('#addChildTask')) $('#addChildTask').onclick=()=>openChildAddV11(t.id);
+
+    if($('#completeParentNow')) $('#completeParentNow').onclick=()=>{
+      completeTask(t.id);
+      ui.modal=null;
+      render();
+    };
+
+    $('#deleteTask').onclick=()=>{
+      if(hasChildrenV11(t.id)){
+        ui.deleteParentId=t.id;
+        ui.modal='deleteParent';
+        render();
+        return;
+      }
+      const oldParentId=t.parentId;
+      state.tasks=state.tasks.filter(x=>x.id!==t.id);
+      restoreFormerParentPointsV11(oldParentId);
+      save();
+      ui.modal=null;
+      render();
+    };
+
+    $('#closeDetail').onclick=()=>{
+      const input=$('#taskTitleEdit');
+      if(input && input.value.trim()) t.content=input.value.trim();
+      save();
+      ui.modal=null;
+      render();
+    };
+  };
+
+  const bindModalV10 = bindModal;
+  bindModal = function(){
+    if(ui.modal === 'parentPicker'){
+      $('#backdrop').onclick=e=>{
+        if(e.target.id==='backdrop'){
+          ui.modal='detail';
+          render();
+        }
+      };
+      $$('[data-parent-choice]').forEach(b=>b.onclick=()=>{
+        const child=taskByIdV11(ui.parentPickerTaskId);
+        const parentId=b.dataset.parentChoice || null;
+        if(setParentV11(child,parentId)){
+          ui.detailId=child.id;
+          ui.modal='detail';
+          render();
+        }
+      });
+      $('#cancelParentPicker').onclick=()=>{
+        ui.modal='detail';
+        render();
+      };
+      return;
+    }
+
+    if(ui.modal === 'deleteParent'){
+      $('#backdrop').onclick=e=>{
+        if(e.target.id==='backdrop'){
+          ui.modal='detail';
+          render();
+        }
+      };
+
+      $('#deleteParentOnly').onclick=()=>{
+        const id=ui.deleteParentId;
+        state.tasks.forEach(c=>{
+          if(c.parentId===id) c.parentId=null;
+        });
+        state.tasks=state.tasks.filter(x=>x.id!==id);
+        save();
+        ui.modal=null;
+        ui.deleteParentId=null;
+        render();
+      };
+
+      $('#deleteParentAll').onclick=()=>{
+        const id=ui.deleteParentId;
+        state.tasks=state.tasks.filter(x=>x.id!==id && x.parentId!==id);
+        save();
+        ui.modal=null;
+        ui.deleteParentId=null;
+        render();
+      };
+
+      $('#cancelDeleteParent').onclick=()=>{
+        ui.modal='detail';
+        render();
+      };
+      return;
+    }
+
+    if(ui.modal === 'parentDone'){
+      $('#backdrop').onclick=e=>{
+        if(e.target.id==='backdrop'){
+          ui.modal=null;
+          render();
+        }
+      };
+
+      $('#completeParentYes').onclick=()=>{
+        const id=ui.parentCompleteId;
+        ui.modal=null;
+        ui.parentCompleteId=null;
+        completeTask(id);
+      };
+
+      $('#completeParentNo').onclick=()=>{
+        ui.modal=null;
+        ui.parentCompleteId=null;
+        render();
+      };
+      return;
+    }
+
+    return bindModalV10();
+  };
+
+  // Parent cannot be accidentally completed while unfinished children remain.
+  // Finishing the final child offers, but never forces, parent completion.
+  const completeTaskV10 = completeTask;
+  completeTask = function(id){
+    const t = taskByIdV11(id);
+    if(!t) return;
+
+    if(isParentV11(t)){
+      const left = unfinishedChildrenV11(t.id);
+      if(left.length){
+        ui.snack={text:`未完了の子タスクが${left.length}件あります`,id:null};
+        render();
+        setTimeout(()=>{
+          if(ui.snack && !ui.snack.id){
+            ui.snack=null;
+            render();
+          }
+        },3000);
+        return;
+      }
+    }
+
+    const parentId=t.parentId || null;
+    completeTaskV10(id);
+
+    if(parentId){
+      const parent=taskByIdV11(parentId);
+      if(parent && !parent.completedAt && unfinishedChildrenV11(parentId).length===0){
+        ui.parentCompleteId=parentId;
+        ui.modal='parentDone';
+        render();
+      }
+    }
+  };
+
+  // Child titles can be short ("7月分"), so show the parent context on cards.
+  const cardHtmlV10 = cardHtml;
+  cardHtml = function(t,primary){
+    const html=cardHtmlV10(t,primary);
+    const parent=parentForV11(t);
+    if(!parent) return html;
+
+    const marker=`<span class="child-parent-meta">↳ ${esc(parent.content)}</span>`;
+    return html.replace('<div class="task-meta">','<div class="task-meta">'+marker);
+  };
+
+  // Keep every parent at 0 pt, including after reload/update.
+  state.tasks.forEach(t=>{
+    if(hasChildrenV11(t.id)) makeParentV11(t);
+  });
+  save();
+
+  render();
+  console.info(`[Task City] patch ${PATCH_VERSION_V11} loaded`);
+})();
