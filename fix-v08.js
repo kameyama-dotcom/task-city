@@ -1421,3 +1421,199 @@
   render();
   console.info(`[Task City] patch ${PATCH_VERSION_V11} loaded`);
 })();
+/* === v0.12 : today tag filters + hide city from home === */
+(() => {
+  const PATCH_VERSION_V12 = '0.12.1';
+  const FILTER_KEY = 'taskCityTodayHiddenTagsV1';
+
+  const style = document.createElement('style');
+  style.textContent = `
+    .today-filter-wrap{margin:2px 0 12px;padding:10px 0 2px}
+    .today-filter-title{font-size:12px;color:var(--muted);font-weight:850;margin:0 2px 7px}
+    .today-filter-scroll{display:flex;gap:7px;overflow-x:auto;padding:1px 2px 5px;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+    .today-filter-scroll::-webkit-scrollbar{display:none}
+    .today-tag-chip{flex:0 0 auto;border:1px solid var(--line);background:#fff;color:var(--muted);border-radius:999px;padding:8px 11px;font-weight:850;font-size:12px}
+    .today-tag-chip.on{background:#eafcfc;border-color:#8adfe1;color:#17666a;box-shadow:inset 0 0 0 1px #19c5c7}
+    .today-tag-chip.all{font-weight:950}
+    .today-no-city-spacer{height:2px}
+    @media(max-width:560px){
+      .today-filter-wrap{margin-top:0;padding-top:4px}
+      .today-tag-chip{padding:7px 10px;font-size:11px}
+    }
+  `;
+  document.head.appendChild(style);
+
+  function loadHiddenTagsV12(){
+    try{
+      const v = JSON.parse(localStorage.getItem(FILTER_KEY) || '[]');
+      return Array.isArray(v) ? v : [];
+    }catch(e){
+      return [];
+    }
+  }
+
+  function saveHiddenTagsV12(){
+    try{
+      localStorage.setItem(FILTER_KEY, JSON.stringify(ui.todayHiddenTags || []));
+    }catch(e){}
+  }
+
+  ui.todayHiddenTags = loadHiddenTagsV12();
+
+  function hiddenSetV12(){
+    return new Set((ui.todayHiddenTags || []).filter(k => TAGS[k]));
+  }
+
+  function tagVisibleV12(t){
+    return !hiddenSetV12().has(t.tag);
+  }
+
+  function tagFilterHtmlV12(){
+    const hidden = hiddenSetV12();
+    const ids = Object.keys(TAGS);
+    const allOn = ids.every(k => !hidden.has(k));
+
+    return `<div class="today-filter-wrap">
+      <div class="today-filter-title">表示するタグ</div>
+      <div class="today-filter-scroll">
+        <button class="today-tag-chip all ${allOn?'on':''}" data-tag-filter-all="1">全部</button>
+        ${ids.map(k=>{
+          const v=TAGS[k], on=!hidden.has(k);
+          return `<button class="today-tag-chip ${on?'on':''}" data-tag-filter="${escAttr(k)}">${esc(v.icon)} ${esc(v.name)}</button>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }
+
+  const todayTasksBeforeV12 = todayTasks;
+  todayTasks = function(){
+    return todayTasksBeforeV12().filter(tagVisibleV12);
+  };
+
+  function isTodayTargetV12(t, day=today()){
+    return t.planDate===day || t.deadline===day;
+  }
+
+  function pastTasksV12(){
+    const day=today();
+    const q={hh:0,hl:1,lh:2,ll:3};
+
+    return active().filter(t=>{
+      if(!tagVisibleV12(t)) return false;
+      if(isTodayTargetV12(t,day)) return false;
+      return (t.deadline && t.deadline<day) || (t.planDate && t.planDate<day);
+    }).sort((a,b)=>{
+      const ad=a.deadline||a.planDate||'9999-99-99';
+      const bd=b.deadline||b.planDate||'9999-99-99';
+      if(ad!==bd) return ad.localeCompare(bd);
+      return (q[a.quad]??9)-(q[b.quad]??9);
+    });
+  }
+
+  function pastReasonV12(t){
+    const day=today();
+    if(t.deadline && t.deadline<day){
+      const days=Math.max(1,Math.floor((new Date(day+'T00:00:00')-new Date(t.deadline+'T00:00:00'))/86400000));
+      return `〆切 ${days}日超過`;
+    }
+    if(t.planDate && t.planDate<day){
+      return `実行予定 ${fmt(t.planDate)} 未完了`;
+    }
+    return '未完了';
+  }
+
+  function pastCardHtmlV12(t){
+    const tag=safeTag(t.tag);
+    const parent=t.parentId?state.tasks.find(x=>x.id===t.parentId):null;
+    const parentMeta=parent?`<span class="child-parent-meta">↳ ${esc(parent.content)}</span>`:'';
+
+    return `<article class="task-card" data-task="${t.id}" style="--accent:${QUADS[t.quad].color}">
+      <div class="task-line">
+        <span class="priority-icons">${priorityIcons(t.quad)}</span>
+        <span class="task-tag-only" title="${escAttr(tag.name)}">${tag.icon}</span>
+        <span class="task-title-inline">${esc(t.content)}</span>
+        <span class="points">★${t.points}</span>
+      </div>
+      <div class="task-meta">
+        ${parentMeta}
+        <span class="past-reason">${esc(pastReasonV12(t))}</span>
+        ${t.minutes?`<span>予測 ${t.minutes}分</span>`:''}
+      </div>
+    </article>`;
+  }
+
+  todayHtml = function(){
+    const day=today();
+    const ts=todayTasks();
+    const past=pastTasksV12();
+    const hidden=hiddenSetV12();
+
+    const done=state.tasks.filter(t=>
+      t.completedAt &&
+      iso(t.completedAt)===day &&
+      isTodayTargetV12(t,day) &&
+      !hidden.has(t.tag)
+    ).length;
+
+    const up=unplanned();
+
+    const pastHtml=past.length?`
+      <section class="overdue-block">
+        <div class="overdue-head"><span>⚠️ 過去のタスク</span><span class="overdue-count">${past.length}</span></div>
+        <div class="overdue-cards">${past.map(pastCardHtmlV12).join('')}</div>
+      </section>`:'';
+
+    const todayCards=ts.length
+      ?ts.map(t=>cardHtml(t,false)).join('')
+      :`<div class="panel empty">☕<br><span class="subtle">選択したタグの今日のタスクはありません</span></div>`;
+
+    return `<div class="today-no-city-spacer"></div>
+      ${tagFilterHtmlV12()}
+      ${pastHtml}
+      <div class="today-strip">
+        <span class="today-count">今日のタスク　${done}/${ts.length+done}</span>
+        <button class="inbox-mini ${needsPlanAttention(up)?'warn':''}" data-view="plan" title="未計画">未 ${up.length}</button>
+      </div>
+      <div class="today-all-note">優先度順 · すべて表示</div>
+      <div class="cards">${todayCards}</div>`;
+  };
+
+  const bindBeforeV12 = bind;
+  bind = function(){
+    bindBeforeV12();
+
+    const allBtn=document.querySelector('[data-tag-filter-all]');
+    if(allBtn){
+      allBtn.onclick=()=>{
+        ui.todayHiddenTags=[];
+        saveHiddenTagsV12();
+        render();
+      };
+    }
+
+    document.querySelectorAll('[data-tag-filter]').forEach(btn=>{
+      btn.onclick=()=>{
+        const key=btn.dataset.tagFilter;
+        const hidden=hiddenSetV12();
+        const ids=Object.keys(TAGS);
+        const allOn=ids.every(k=>!hidden.has(k));
+
+        if(allOn){
+          // 「全部」状態から個別タグを押したら、そのタグだけ表示。
+          ui.todayHiddenTags=ids.filter(k=>k!==key);
+        }else{
+          // 個別選択中は通常のON/OFF。最後の1個もOFFにできる。
+          if(hidden.has(key)) hidden.delete(key);
+          else hidden.add(key);
+          ui.todayHiddenTags=Array.from(hidden);
+        }
+
+        saveHiddenTagsV12();
+        render();
+      };
+    });
+  };
+
+  render();
+  console.info(`[Task City] patch ${PATCH_VERSION_V12} loaded`);
+})();
