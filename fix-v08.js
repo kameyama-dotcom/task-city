@@ -1617,3 +1617,988 @@
   render();
   console.info(`[Task City] patch ${PATCH_VERSION_V12} loaded`);
 })();
+/* === v0.13 : sibling add + today/tomorrow + recurring tasks === */
+(() => {
+  const PATCH_VERSION_V13 = '0.13.0';
+  const DAY_MS = 86400000;
+
+  const style = document.createElement('style');
+  style.textContent = `
+    .day-switch{
+      display:flex;
+      gap:4px;
+      padding:4px;
+      margin:2px 0 7px;
+      width:max-content;
+      border:1px solid var(--line);
+      border-radius:999px;
+      background:#f1f8f8;
+    }
+    .day-switch button{
+      border:0;
+      background:transparent;
+      color:var(--muted);
+      padding:8px 17px;
+      border-radius:999px;
+      font-weight:950;
+      font-size:13px;
+    }
+    .day-switch button.active{
+      background:#fff;
+      color:var(--ink);
+      box-shadow:0 3px 10px rgba(33,49,59,.09);
+    }
+    .recurrence-box{
+      border:1px solid #bfe7e6;
+      border-radius:16px;
+      padding:12px;
+      background:#f4fcfc;
+    }
+    .recurrence-head{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:9px;
+    }
+    .recurrence-summary{
+      display:flex;
+      flex-wrap:wrap;
+      align-items:center;
+      gap:7px;
+      margin-top:8px;
+      color:#286d71;
+      font-size:12px;
+      font-weight:850;
+    }
+    .miss-badge{
+      display:inline-flex;
+      align-items:center;
+      border-radius:999px;
+      padding:3px 7px;
+      background:#fff0f3;
+      color:#c6325d;
+      font-weight:950;
+      white-space:nowrap;
+    }
+    .recurrence-types{
+      display:grid;
+      grid-template-columns:repeat(3,1fr);
+      gap:6px;
+      margin-top:10px;
+    }
+    .recurrence-types button,
+    .recur-chip{
+      border:1px solid var(--line);
+      background:#fff;
+      color:var(--muted);
+      border-radius:11px;
+      font-weight:850;
+    }
+    .recurrence-types button{
+      padding:9px 5px;
+      font-size:12px;
+    }
+    .recurrence-types button.selected,
+    .recur-chip.selected{
+      background:#dcf7f7;
+      border-color:#69d5d7;
+      color:#17666a;
+      box-shadow:inset 0 0 0 1px #19c5c7;
+    }
+    .weekday-grid{
+      display:grid;
+      grid-template-columns:repeat(7,1fr);
+      gap:5px;
+      margin-top:8px;
+    }
+    .monthday-grid{
+      display:grid;
+      grid-template-columns:repeat(7,1fr);
+      gap:5px;
+      margin-top:8px;
+      max-height:190px;
+      overflow-y:auto;
+      -webkit-overflow-scrolling:touch;
+    }
+    .recur-chip{
+      min-width:0;
+      padding:8px 2px;
+      font-size:11px;
+    }
+    .recurrence-actions{
+      display:flex;
+      gap:7px;
+      margin-top:11px;
+    }
+    .recurrence-actions button{flex:1}
+    .recurrence-note{
+      margin-top:8px;
+      color:var(--muted);
+      font-size:11px;
+      line-height:1.5;
+    }
+    .recurring-meta{
+      color:#26757a!important;
+      font-weight:900;
+    }
+    .sibling-add-wrap{margin-top:-2px}
+    .sibling-add-wrap button{width:100%}
+    .recur-disabled-note{
+      padding:10px 12px;
+      border-radius:13px;
+      background:#f4f6f6;
+      color:var(--muted);
+      font-size:12px;
+      font-weight:800;
+    }
+    @media(max-width:560px){
+      .day-switch button{padding:7px 15px;font-size:12px}
+      .recurrence-box{padding:10px}
+      .monthday-grid{max-height:170px}
+    }
+  `;
+  document.head.appendChild(style);
+
+  ui.todayDayOffset = Number.isInteger(ui.todayDayOffset) ? ui.todayDayOffset : 0;
+  ui.recurEditId = ui.recurEditId || null;
+  ui.recurDraft = ui.recurDraft || null;
+  ui.draftRecurring = ui.draftRecurring || null;
+  ui.recurringUndo = null;
+
+  const isoDateV13 = d => iso(d);
+  const dateV13 = s => new Date(`${s}T00:00:00`);
+  const addIsoDaysV13 = (s,n) => isoDateV13(addDays(dateV13(s),n));
+  const currentDayV13 = () => today();
+  const targetDayV13 = () => addIsoDaysV13(currentDayV13(), ui.todayDayOffset || 0);
+  const hasChildrenV13 = t => !!t && state.tasks.some(c => c.parentId === t.id);
+  const taskByIdV13 = id => state.tasks.find(t => t.id === id);
+
+  function tagVisibleV13(t){
+    const hidden = new Set((ui.todayHiddenTags || []).filter(k => TAGS[k]));
+    return !hidden.has(t.tag);
+  }
+
+  function recurrenceValidV13(r){
+    if(!r || !['daily','weekly','monthly'].includes(r.type)) return false;
+    if(r.type==='weekly') return Array.isArray(r.weekdays) && r.weekdays.length>0;
+    if(r.type==='monthly') return Array.isArray(r.monthDays) && r.monthDays.length>0;
+    return true;
+  }
+
+  function normalizeRecurrenceV13(r){
+    if(!r) return null;
+    r.type = ['daily','weekly','monthly'].includes(r.type) ? r.type : 'daily';
+    r.weekdays = Array.from(new Set((r.weekdays || []).map(Number).filter(n=>n>=0&&n<=6))).sort((a,b)=>a-b);
+    r.monthDays = Array.from(new Set((r.monthDays || []).map(Number).filter(n=>n>=1&&n<=31))).sort((a,b)=>a-b);
+    r.startDate = r.startDate || currentDayV13();
+    r.missCount = Math.max(0,Number(r.missCount)||0);
+    r.history = Array.isArray(r.history) ? r.history : [];
+    return r;
+  }
+
+  function monthAnchorsV13(year, month0, r){
+    const last = new Date(year,month0+1,0).getDate();
+    return Array.from(new Set(
+      (r.monthDays||[]).map(n=>Math.min(n,last))
+    )).sort((a,b)=>a-b).map(day=>{
+      const d=new Date(year,month0,day);
+      return isoDateV13(d);
+    });
+  }
+
+  function nextAnchorOnOrAfterV13(startIso,r){
+    r=normalizeRecurrenceV13(r);
+    if(r.type==='daily') return startIso;
+
+    if(r.type==='weekly'){
+      let d=dateV13(startIso);
+      for(let i=0;i<15;i++){
+        if(r.weekdays.includes(d.getDay())) return isoDateV13(d);
+        d=addDays(d,1);
+      }
+      return startIso;
+    }
+
+    const start=dateV13(startIso);
+    for(let m=0;m<15;m++){
+      const probe=new Date(start.getFullYear(),start.getMonth()+m,1);
+      const candidates=monthAnchorsV13(probe.getFullYear(),probe.getMonth(),r)
+        .filter(x=>x>=startIso);
+      if(candidates.length) return candidates[0];
+    }
+    return startIso;
+  }
+
+  function nextAnchorAfterV13(anchorIso,r){
+    return nextAnchorOnOrAfterV13(addIsoDaysV13(anchorIso,1),r);
+  }
+
+  function recurrenceWindowV13(t){
+    if(!recurrenceValidV13(t?.recurrence)) return null;
+    const r=normalizeRecurrenceV13(t.recurrence);
+    const min=r.occurrenceDate;
+    if(!min) return null;
+    const next=nextAnchorAfterV13(min,r);
+    return {min,max:addIsoDaysV13(next,-1),next};
+  }
+
+  function recurrenceLabelV13(r){
+    if(!r) return '';
+    if(r.type==='daily') return '毎日';
+    if(r.type==='weekly'){
+      const names=['日','月','火','水','木','金','土'];
+      const ordered=[1,2,3,4,5,6,0].filter(n=>(r.weekdays||[]).includes(n));
+      return `毎週 ${ordered.map(n=>names[n]).join('・')}`;
+    }
+    return `毎月 ${(r.monthDays||[]).join('・')}日`;
+  }
+
+  function recurrenceMetaV13(t){
+    const r=t?.recurrence;
+    if(!recurrenceValidV13(r)) return '';
+    const miss=(r.missCount||0)>0 ? ` <span class="miss-badge">❌${r.missCount}</span>` : '';
+    return `<span class="recurring-meta">🔁 ${esc(recurrenceLabelV13(r))}${miss}</span>`;
+  }
+
+  function syncRecurringTaskV13(t, day=currentDayV13()){
+    const r=normalizeRecurrenceV13(t?.recurrence);
+    if(!recurrenceValidV13(r)) return false;
+
+    let changed=false;
+    if(!r.occurrenceDate){
+      r.occurrenceDate=nextAnchorOnOrAfterV13(r.startDate||day,r);
+      t.planDate=r.occurrenceDate;
+      changed=true;
+    }
+
+    let guard=0;
+    while(guard++<400){
+      const next=nextAnchorAfterV13(r.occurrenceDate,r);
+      if(next>day) break;
+
+      r.history.push({
+        status:'missed',
+        scheduledDate:r.occurrenceDate,
+        planDate:t.planDate||r.occurrenceDate,
+        missedAt:next
+      });
+      r.missCount=(r.missCount||0)+1;
+      r.occurrenceDate=next;
+      t.planDate=next;
+      t.completedAt=null;
+      changed=true;
+    }
+
+    const w=recurrenceWindowV13(t);
+    if(w && (t.planDate<w.min || t.planDate>w.max)){
+      t.planDate=w.min;
+      changed=true;
+    }
+    return changed;
+  }
+
+  function syncAllRecurringV13(){
+    let changed=false;
+    state.tasks.forEach(t=>{
+      if(t.recurrence && syncRecurringTaskV13(t)) changed=true;
+    });
+    if(changed) save();
+    return changed;
+  }
+
+  state.tasks.forEach(t=>{
+    if(t.recurrence) normalizeRecurrenceV13(t.recurrence);
+  });
+  syncAllRecurringV13();
+
+  function defaultRecurDraftV13(){
+    const d=new Date();
+    return {
+      type:'daily',
+      weekdays:[d.getDay()],
+      monthDays:[d.getDate()]
+    };
+  }
+
+  function cloneRecurDraftV13(r){
+    if(!r) return defaultRecurDraftV13();
+    return {
+      type:r.type||'daily',
+      weekdays:[...(r.weekdays||[])],
+      monthDays:[...(r.monthDays||[])]
+    };
+  }
+
+  function installRecurrenceV13(t,draft){
+    if(!t || hasChildrenV13(t)) return false;
+    const old=t.recurrence;
+    const r={
+      type:draft.type,
+      weekdays:Array.from(new Set(draft.weekdays||[])).sort((a,b)=>a-b),
+      monthDays:Array.from(new Set(draft.monthDays||[])).sort((a,b)=>a-b),
+      startDate:currentDayV13(),
+      occurrenceDate:'',
+      missCount:old?.missCount||0,
+      history:Array.isArray(old?.history)?old.history:[]
+    };
+    if(!recurrenceValidV13(r)) return false;
+    r.occurrenceDate=nextAnchorOnOrAfterV13(currentDayV13(),r);
+    t.recurrence=r;
+    t.planDate=r.occurrenceDate;
+    t.completedAt=null;
+    t.deadline='';
+    t.deadlineTime='';
+    save();
+    return true;
+  }
+
+  function recurrenceEditorHtmlV13(draft,mode){
+    const type=draft?.type||'daily';
+    const weekdays=draft?.weekdays||[];
+    const monthDays=draft?.monthDays||[];
+    const names=[['月',1],['火',2],['水',3],['木',4],['金',5],['土',6],['日',0]];
+
+    return `<div class="recurrence-types">
+      <button data-v13-recur-type="daily" class="${type==='daily'?'selected':''}">毎日</button>
+      <button data-v13-recur-type="weekly" class="${type==='weekly'?'selected':''}">毎週</button>
+      <button data-v13-recur-type="monthly" class="${type==='monthly'?'selected':''}">毎月</button>
+    </div>
+    ${type==='weekly'?`
+      <div class="weekday-grid">
+        ${names.map(([name,n])=>`<button class="recur-chip ${weekdays.includes(n)?'selected':''}" data-v13-weekday="${n}">${name}</button>`).join('')}
+      </div>
+      <div class="recurrence-note">曜日は複数選択できます。各回は次の定期日の前日まで移動できます。</div>
+    `:''}
+    ${type==='monthly'?`
+      <div class="monthday-grid">
+        ${Array.from({length:31},(_,i)=>i+1).map(n=>`<button class="recur-chip ${monthDays.includes(n)?'selected':''}" data-v13-monthday="${n}">${n}</button>`).join('')}
+      </div>
+      <div class="recurrence-note">日付は複数選択できます。存在しない29〜31日は月末扱い。同じ月末に重なった場合は1回にまとめます。</div>
+    `:''}
+    ${type==='daily'?`<div class="recurrence-note">毎日は実行予定日を移動できません。</div>`:''}
+    ${mode==='detail'?`
+      <div class="recurrence-actions">
+        <button id="cancelRecurrenceEdit" class="ghost">キャンセル</button>
+        <button id="saveRecurrenceEdit" class="primary-btn">設定</button>
+      </div>`:''}`;
+  }
+
+  function recurrenceDetailHtmlV13(t){
+    if(hasChildrenV13(t)){
+      return `<div class="detail-section"><div class="recur-disabled-note">🔁 子を持つ親タスクは定期タスクにできません。</div></div>`;
+    }
+
+    if(ui.recurEditId===t.id && ui.recurDraft){
+      return `<div class="detail-section"><div class="recurrence-box">
+        <div class="recurrence-head"><b>🔁 定期設定</b></div>
+        ${recurrenceEditorHtmlV13(ui.recurDraft,'detail')}
+      </div></div>`;
+    }
+
+    if(t.recurrence){
+      const r=t.recurrence;
+      const w=recurrenceWindowV13(t);
+      return `<div class="detail-section"><div class="recurrence-box">
+        <div class="recurrence-head">
+          <b>🔁 ${esc(recurrenceLabelV13(r))}</b>
+          <button id="editRecurrence" class="ghost">変更</button>
+        </div>
+        <div class="recurrence-summary">
+          <span>今回 ${fmt(r.occurrenceDate)}</span>
+          ${t.planDate!==r.occurrenceDate?`<span>→ 予定 ${fmt(t.planDate)}</span>`:''}
+          ${(r.missCount||0)>0?`<span class="miss-badge">❌${r.missCount}</span>`:''}
+        </div>
+        ${w&&r.type!=='daily'?`<div class="recurrence-note">今回の実行予定日は ${fmt(w.min)}〜${fmt(w.max)} の範囲で変更できます。</div>`:''}
+        <button id="removeRecurrence" class="ghost" style="width:100%;margin-top:10px">定期を解除</button>
+      </div></div>`;
+    }
+
+    return `<div class="detail-section">
+      <button id="startRecurrence" class="ghost" style="width:100%">🔁 定期</button>
+    </div>`;
+  }
+
+  function recurrenceDraftHtmlV13(){
+    if(!ui.draftRecurring){
+      return `<div class="field"><button id="startDraftRecurrence" class="ghost" style="width:100%">🔁 定期</button></div>`;
+    }
+    return `<div class="field"><div class="recurrence-box">
+      <div class="recurrence-head">
+        <b>🔁 定期</b>
+        <button id="removeDraftRecurrence" class="ghost">解除</button>
+      </div>
+      ${recurrenceEditorHtmlV13(ui.draftRecurring,'draft')}
+    </div></div>`;
+  }
+
+  function bindRecurControlsV13(draft,onChange){
+    $$('[data-v13-recur-type]').forEach(b=>b.onclick=()=>{
+      draft.type=b.dataset.v13RecurType;
+      onChange();
+    });
+    $$('[data-v13-weekday]').forEach(b=>b.onclick=()=>{
+      const n=Number(b.dataset.v13Weekday);
+      const s=new Set(draft.weekdays||[]);
+      if(s.has(n)) s.delete(n); else s.add(n);
+      draft.weekdays=Array.from(s);
+      onChange();
+    });
+    $$('[data-v13-monthday]').forEach(b=>b.onclick=()=>{
+      const n=Number(b.dataset.v13Monthday);
+      const s=new Set(draft.monthDays||[]);
+      if(s.has(n)) s.delete(n); else s.add(n);
+      draft.monthDays=Array.from(s);
+      onChange();
+    });
+  }
+
+  function recurDraftIsValidV13(d){
+    if(!d) return false;
+    if(d.type==='weekly') return (d.weekdays||[]).length>0;
+    if(d.type==='monthly') return (d.monthDays||[]).length>0;
+    return true;
+  }
+
+  function showSnackV13(text,ms=2800){
+    ui.snack={text,id:null};
+    render();
+    setTimeout(()=>{
+      if(ui.snack && !ui.snack.id && ui.snack.text===text){
+        ui.snack=null;
+        render();
+      }
+    },ms);
+  }
+
+  // ---- New task: recurring controls are hidden until "定期" is pressed. ----
+  const openAddBeforeV13 = openAdd;
+  openAdd = function(tag){
+    ui.draftRecurring=null;
+    return openAddBeforeV13(tag);
+  };
+
+  const addModalBeforeV13 = addModal;
+  addModal = function(){
+    let html=addModalBeforeV13();
+    html=html.replace('<div class="sheet-actions">', recurrenceDraftHtmlV13() + '<div class="sheet-actions">');
+    return html;
+  };
+
+  const bindAddBeforeV13 = bindAdd;
+  bindAdd = function(){
+    bindAddBeforeV13();
+
+    if(ui.draftRecurring){
+      const deadlineField=$('.deadline-caption')?.closest('.field');
+      if(deadlineField) deadlineField.style.display='none';
+      bindRecurControlsV13(ui.draftRecurring,()=>render());
+    }
+
+    if($('#startDraftRecurrence')) $('#startDraftRecurrence').onclick=()=>{
+      ui.draftRecurring=defaultRecurDraftV13();
+      render();
+    };
+    if($('#removeDraftRecurrence')) $('#removeDraftRecurrence').onclick=()=>{
+      ui.draftRecurring=null;
+      render();
+    };
+
+    if($('#cancelModal')) $('#cancelModal').onclick=()=>{
+      ui.draftRecurring=null;
+      ui.newChildParentId=null;
+      ui.modal=null;
+      render();
+    };
+  };
+
+  const saveDraftBeforeV13 = saveDraft;
+  saveDraft = function(again){
+    const recurDraft=ui.draftRecurring ? JSON.parse(JSON.stringify(ui.draftRecurring)) : null;
+    if(recurDraft && !recurDraftIsValidV13(recurDraft)){
+      showSnackV13(recurDraft.type==='weekly'?'曜日を1つ以上選んでください':'日付を1つ以上選んでください');
+      return;
+    }
+
+    const beforeIds=new Set(state.tasks.map(t=>t.id));
+    saveDraftBeforeV13(again);
+
+    if(recurDraft){
+      const created=state.tasks.find(t=>!beforeIds.has(t.id));
+      if(created) installRecurrenceV13(created,recurDraft);
+      ui.draftRecurring=null;
+      render();
+    }
+  };
+
+  // ---- Child detail: add another child under the same parent. ----
+  function openSiblingAddV13(child){
+    const parent=taskByIdV13(child?.parentId);
+    if(!parent) return;
+    ui.newChildParentId=parent.id;
+    ui.draftRecurring=null;
+    ui.radial=false;
+    ui.addTag=child.tag;
+    ui.draft=newDraft(child.tag);
+    ui.draft.quad=child.quad;
+    ui.modal='add';
+    render();
+    requestAnimationFrame(()=>$('#content')?.focus());
+  }
+
+  // ---- Detail: recurring settings and sibling button. ----
+  const detailModalBeforeV13 = detailModal;
+  detailModal = function(){
+    syncAllRecurringV13();
+    const t=taskByIdV13(ui.detailId);
+    let html=detailModalBeforeV13();
+    if(!t) return html;
+
+    const sibling=t.parentId ? `
+      <div class="detail-section sibling-add-wrap">
+        <button id="addSiblingTask" class="ghost">＋ 同じ親に子タスクを追加</button>
+      </div>` : '';
+
+    const recurring=recurrenceDetailHtmlV13(t);
+    html=html.replace('<div class="detail-section point-area">', sibling + recurring + '<div class="detail-section point-area">');
+    return html;
+  };
+
+  const bindDetailBeforeV13 = bindDetail;
+  bindDetail = function(){
+    bindDetailBeforeV13();
+    const t=taskByIdV13(ui.detailId);
+    if(!t) return;
+
+    if($('#addSiblingTask')) $('#addSiblingTask').onclick=()=>openSiblingAddV13(t);
+
+    if(t.recurrence){
+      const deadline=$('.deadline-focus');
+      if(deadline) deadline.style.display='none';
+
+      const w=recurrenceWindowV13(t);
+      $$('.task-plan-step').forEach(b=>{
+        const delta=Number(b.dataset.d);
+        const next=addIsoDaysV13(t.planDate||w.min,delta);
+        b.disabled = !w || next<w.min || next>w.max;
+        b.onclick=()=>{
+          if(!w) return;
+          t.planDate = next<w.min?w.min:next>w.max?w.max:next;
+          save();
+          render();
+        };
+      });
+
+      if($('#detailPlan')){
+        if(t.recurrence.type==='daily'){
+          $('#detailPlan').onclick=()=>showSnackV13('毎日の定期タスクは実行予定日を移動できません');
+        }else{
+          $('#detailPlan').onclick=()=>openDate(t.id);
+        }
+      }
+
+      if($('#addChildTask')){
+        $('#addChildTask').onclick=()=>showSnackV13('定期タスクを親にする場合は、先に定期を解除してください');
+      }
+    }
+
+    if($('#startRecurrence')) $('#startRecurrence').onclick=()=>{
+      ui.recurEditId=t.id;
+      ui.recurDraft=defaultRecurDraftV13();
+      render();
+    };
+
+    if($('#editRecurrence')) $('#editRecurrence').onclick=()=>{
+      ui.recurEditId=t.id;
+      ui.recurDraft=cloneRecurDraftV13(t.recurrence);
+      render();
+    };
+
+    if(ui.recurEditId===t.id && ui.recurDraft){
+      bindRecurControlsV13(ui.recurDraft,()=>render());
+
+      if($('#cancelRecurrenceEdit')) $('#cancelRecurrenceEdit').onclick=()=>{
+        ui.recurEditId=null;
+        ui.recurDraft=null;
+        render();
+      };
+
+      if($('#saveRecurrenceEdit')) $('#saveRecurrenceEdit').onclick=()=>{
+        if(!recurDraftIsValidV13(ui.recurDraft)){
+          showSnackV13(ui.recurDraft.type==='weekly'?'曜日を1つ以上選んでください':'日付を1つ以上選んでください');
+          return;
+        }
+        if(installRecurrenceV13(t,ui.recurDraft)){
+          ui.recurEditId=null;
+          ui.recurDraft=null;
+          render();
+        }
+      };
+    }
+
+    if($('#removeRecurrence')) $('#removeRecurrence').onclick=()=>{
+      t.recurrenceArchive=t.recurrence;
+      t.recurrence=null;
+      ui.recurEditId=null;
+      ui.recurDraft=null;
+      save();
+      render();
+    };
+  };
+
+  // Recurring tasks cannot be selected as parents.
+  const bindModalBeforeV13 = bindModal;
+  bindModal = function(){
+    bindModalBeforeV13();
+    if(ui.modal==='parentPicker'){
+      $$('[data-parent-choice]').forEach(b=>{
+        const id=b.dataset.parentChoice;
+        if(!id) return;
+        const candidate=taskByIdV13(id);
+        if(candidate?.recurrence){
+          b.disabled=true;
+          b.title='定期タスクは親タスクにできません';
+          b.style.opacity='.45';
+        }
+      });
+    }
+  };
+
+  // ---- Planned-date movement: weekly/monthly stay inside the current recurrence window. ----
+  const openDateBeforeV13 = openDate;
+  openDate = function(id){
+    syncAllRecurringV13();
+    const t=taskByIdV13(id);
+    if(t?.recurrence?.type==='daily'){
+      showSnackV13('毎日の定期タスクは実行予定日を移動できません');
+      return;
+    }
+    openDateBeforeV13(id);
+    if(t?.recurrence){
+      const w=recurrenceWindowV13(t);
+      if(w){
+        if(ui.dateBase<w.min) ui.dateBase=w.min;
+        if(ui.dateBase>w.max) ui.dateBase=w.max;
+      }
+    }
+  };
+
+  const dateModalBeforeV13 = dateModal;
+  dateModal = function(){
+    let html=dateModalBeforeV13();
+    const t=taskByIdV13(ui.detailId);
+    const w=recurrenceWindowV13(t);
+    if(t?.recurrence && w){
+      const note=`<div class="recurrence-note" style="margin:8px 0 0">🔁 今回は ${fmt(w.min)}〜${fmt(w.max)} の範囲で変更できます。</div>`;
+      html=html.replace('<div class="plan-edit-box">', note + '<div class="plan-edit-box">');
+    }
+    return html;
+  };
+
+  const bindDateBeforeV13 = bindDate;
+  bindDate = function(){
+    bindDateBeforeV13();
+    const t=taskByIdV13(ui.detailId);
+    const w=recurrenceWindowV13(t);
+    if(!t?.recurrence || !w) return;
+
+    const move=delta=>{
+      let next=addIsoDaysV13(ui.dateBase||t.planDate||w.min,delta);
+      if(next<w.min) next=w.min;
+      if(next>w.max) next=w.max;
+      ui.dateBase=next;
+      render();
+    };
+
+    $('#dateMinus').onclick=()=>move(-1);
+    $('#datePlus').onclick=()=>move(1);
+
+    $('#confirmDate').onclick=()=>{
+      let chosen=ui.dateBase||t.planDate||w.min;
+      if(chosen<w.min) chosen=w.min;
+      if(chosen>w.max) chosen=w.max;
+      t.planDate=chosen;
+      t.planTime=normTime(ui.dateTime);
+      t.minutes=Math.max(0,Number(ui.dateMinutes)||0);
+      save();
+      ui.modal=null;
+      render();
+    };
+  };
+
+  // ---- Complete recurring task without destroying the task itself. ----
+  const completeTaskBeforeV13 = completeTask;
+  completeTask = function(id){
+    syncAllRecurringV13();
+    const t=taskByIdV13(id);
+    if(!t?.recurrence) return completeTaskBeforeV13(id);
+
+    const r=normalizeRecurrenceV13(t.recurrence);
+    if(hasChildrenV13(t)){
+      showSnackV13('子を持つ親タスクは定期完了できません');
+      return;
+    }
+
+    const before={
+      recurrence:JSON.parse(JSON.stringify(r)),
+      planDate:t.planDate,
+      planTime:t.planTime,
+      skips:t.skips||0
+    };
+    const completedAt=new Date().toISOString();
+    const scheduledDate=r.occurrenceDate;
+    const actualPlanDate=t.planDate||scheduledDate;
+    const bonus=bonusFor(t);
+    const awarded=(t.points||0)+bonus;
+
+    r.history.push({
+      status:'done',
+      scheduledDate,
+      planDate:actualPlanDate,
+      completedAt,
+      points:awarded
+    });
+    state.history.push({
+      type:'completeRecurring',
+      id:t.id,
+      scheduledDate,
+      planDate:actualPlanDate,
+      at:Date.now(),
+      bonus
+    });
+
+    r.missCount=0;
+    r.occurrenceDate=nextAnchorAfterV13(scheduledDate,r);
+    t.planDate=r.occurrenceDate;
+    t.completedAt=null;
+    t.skips=0;
+    t.bonus=0;
+    t.awardedPoints=null;
+
+    ui.recurringUndo={id:t.id,before};
+    save();
+    ui.snack={text:`✓ 完了　次回 ${fmt(r.occurrenceDate)}`,id:t.id};
+    render();
+
+    setTimeout(()=>{
+      if(ui.snack?.id===t.id){
+        ui.snack=null;
+        ui.recurringUndo=null;
+        render();
+      }
+    },7000);
+  };
+
+  const undoLastBeforeV13 = undoLast;
+  undoLast = function(){
+    const u=ui.recurringUndo;
+    if(u && ui.snack?.id===u.id){
+      const t=taskByIdV13(u.id);
+      if(t){
+        t.recurrence=JSON.parse(JSON.stringify(u.before.recurrence));
+        t.planDate=u.before.planDate;
+        t.planTime=u.before.planTime;
+        t.skips=u.before.skips;
+        if(state.history[state.history.length-1]?.type==='completeRecurring' &&
+           state.history[state.history.length-1]?.id===u.id){
+          state.history.pop();
+        }
+        save();
+      }
+      ui.recurringUndo=null;
+      ui.snack=null;
+      render();
+      return;
+    }
+    return undoLastBeforeV13();
+  };
+
+  // ---- Recurrence badge on cards. ----
+  const cardHtmlBeforeV13 = cardHtml;
+  cardHtml = function(t,primary){
+    let html=cardHtmlBeforeV13(t,primary);
+    if(t.recurrence){
+      html=html.replace('<div class="task-meta">','<div class="task-meta">'+recurrenceMetaV13(t));
+    }
+    return html;
+  };
+
+  // ---- Today / Tomorrow screen. ----
+  function prioritySortV13(a,b){
+    const q={hh:0,hl:1,lh:2,ll:3};
+    const qa=q[a.quad]??9, qb=q[b.quad]??9;
+    if(qa!==qb) return qa-qb;
+
+    const deadlineValue=x=>{
+      if(!x.deadline) return Number.MAX_SAFE_INTEGER;
+      const tm=normTime(x.deadlineTime||'2359')||'2359';
+      return Number(x.deadline.replaceAll('-','')+tm);
+    };
+    const da=deadlineValue(a), db=deadlineValue(b);
+    if(da!==db) return da-db;
+
+    const pt=x=>x.planTime?Number(normTime(x.planTime)):9999;
+    if(pt(a)!==pt(b)) return pt(a)-pt(b);
+    return new Date(a.createdAt)-new Date(b.createdAt);
+  }
+
+  function isTargetV13(t,day){
+    return t.planDate===day || t.deadline===day;
+  }
+
+  todayTasks = function(){
+    syncAllRecurringV13();
+    const day=targetDayV13();
+    return active().filter(t=>tagVisibleV13(t) && isTargetV13(t,day)).sort(prioritySortV13);
+  };
+
+  function pastTasksV13(){
+    if((ui.todayDayOffset||0)!==0) return [];
+    const day=currentDayV13();
+    return active().filter(t=>{
+      if(!tagVisibleV13(t)) return false;
+      if(isTargetV13(t,day)) return false;
+      return (t.deadline&&t.deadline<day)||(t.planDate&&t.planDate<day);
+    }).sort((a,b)=>{
+      const ad=a.deadline||a.planDate||'9999-99-99';
+      const bd=b.deadline||b.planDate||'9999-99-99';
+      if(ad!==bd) return ad.localeCompare(bd);
+      return prioritySortV13(a,b);
+    });
+  }
+
+  function pastReasonV13(t){
+    const day=currentDayV13();
+    if(t.deadline&&t.deadline<day){
+      const days=Math.max(1,Math.floor((dateV13(day)-dateV13(t.deadline))/DAY_MS));
+      return `〆切 ${days}日超過`;
+    }
+    if(t.planDate&&t.planDate<day) return `実行予定 ${fmt(t.planDate)} 未完了`;
+    return '未完了';
+  }
+
+  function pastCardHtmlV13(t){
+    const tag=safeTag(t.tag);
+    const parent=t.parentId?taskByIdV13(t.parentId):null;
+    return `<article class="task-card" data-task="${t.id}" style="--accent:${QUADS[t.quad].color}">
+      <div class="task-line">
+        <span class="priority-icons">${priorityIcons(t.quad)}</span>
+        <span class="task-tag-only" title="${escAttr(tag.name)}">${tag.icon}</span>
+        <span class="task-title-inline">${esc(t.content)}</span>
+        <span class="points">★${t.points}</span>
+      </div>
+      <div class="task-meta">
+        ${t.recurrence?recurrenceMetaV13(t):''}
+        ${parent?`<span class="child-parent-meta">↳ ${esc(parent.content)}</span>`:''}
+        <span class="past-reason">${esc(pastReasonV13(t))}</span>
+        ${t.minutes?`<span>予測 ${t.minutes}分</span>`:''}
+      </div>
+    </article>`;
+  }
+
+  function tagFilterHtmlV13(){
+    const hidden=new Set((ui.todayHiddenTags||[]).filter(k=>TAGS[k]));
+    const ids=Object.keys(TAGS);
+    const allOn=ids.every(k=>!hidden.has(k));
+    return `<div class="today-filter-wrap">
+      <div class="today-filter-title">表示するタグ</div>
+      <div class="today-filter-scroll">
+        <button class="today-tag-chip all ${allOn?'on':''}" data-tag-filter-all="1">全部</button>
+        ${ids.map(k=>{
+          const v=TAGS[k],on=!hidden.has(k);
+          return `<button class="today-tag-chip ${on?'on':''}" data-tag-filter="${escAttr(k)}">${esc(v.icon)} ${esc(v.name)}</button>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }
+
+  function recurrenceDoneCountV13(day){
+    let n=0;
+    state.tasks.forEach(t=>{
+      if(!tagVisibleV13(t) || !t.recurrence) return;
+      (t.recurrence.history||[]).forEach(h=>{
+        if(h.status!=='done' || !h.completedAt) return;
+        if(iso(h.completedAt)!==day) return;
+        const target=h.planDate||h.scheduledDate;
+        if(target===day) n++;
+      });
+    });
+    return n;
+  }
+
+  function doneCountV13(day){
+    const normal=state.tasks.filter(t=>
+      !t.recurrence &&
+      t.completedAt &&
+      iso(t.completedAt)===day &&
+      tagVisibleV13(t) &&
+      isTargetV13(t,day)
+    ).length;
+    return normal+recurrenceDoneCountV13(day);
+  }
+
+  todayHtml = function(){
+    syncAllRecurringV13();
+    const offset=ui.todayDayOffset||0;
+    const day=targetDayV13();
+    const ts=todayTasks();
+    const past=pastTasksV13();
+    const done=doneCountV13(day);
+    const up=unplanned();
+    const label=offset===0?'今日':'明日';
+
+    const pastHtml=offset===0 && past.length ? `
+      <section class="overdue-block">
+        <div class="overdue-head"><span>⚠️ 過去のタスク</span><span class="overdue-count">${past.length}</span></div>
+        <div class="overdue-cards">${past.map(pastCardHtmlV13).join('')}</div>
+      </section>`:'';
+
+    const cards=ts.length
+      ?ts.map(t=>cardHtml(t,false)).join('')
+      :`<div class="panel empty">☕<br><span class="subtle">選択したタグの${label}のタスクはありません</span></div>`;
+
+    return `<div class="today-no-city-spacer"></div>
+      <div class="day-switch">
+        <button data-day-offset="0" class="${offset===0?'active':''}">今日</button>
+        <button data-day-offset="1" class="${offset===1?'active':''}">明日</button>
+      </div>
+      ${tagFilterHtmlV13()}
+      ${pastHtml}
+      <div class="today-strip">
+        <span class="today-count">${label}のタスク　${done}/${ts.length+done}</span>
+        <button class="inbox-mini ${needsPlanAttention(up)?'warn':''}" data-view="plan" title="未計画">未 ${up.length}</button>
+      </div>
+      <div class="today-all-note">優先度順 · すべて表示</div>
+      <div class="cards">${cards}</div>`;
+  };
+
+  // Keep recurrence synchronized in views where todayHtml is not called.
+  const listHtmlBeforeV13 = listHtml;
+  listHtml = function(){
+    syncAllRecurringV13();
+    return listHtmlBeforeV13();
+  };
+  const planHtmlBeforeV13 = planHtml;
+  planHtml = function(){
+    syncAllRecurringV13();
+    return planHtmlBeforeV13();
+  };
+
+  const bindBeforeV13 = bind;
+  bind = function(){
+    bindBeforeV13();
+    $$('[data-day-offset]').forEach(b=>b.onclick=()=>{
+      ui.todayDayOffset=Number(b.dataset.dayOffset)||0;
+      render();
+    });
+  };
+
+  window.addEventListener('focus',()=>{
+    if(syncAllRecurringV13()) render();
+  });
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState==='visible' && syncAllRecurringV13()) render();
+  });
+
+  render();
+  console.info(`[Task City] patch ${PATCH_VERSION_V13} loaded`);
+})();
