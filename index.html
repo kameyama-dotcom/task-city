@@ -163,7 +163,8 @@ function makeId(){try{if(window.crypto&&typeof window.crypto.randomUUID==='funct
 const $=s=>document.querySelector(s); const $$=s=>[...document.querySelectorAll(s)];
 const iso=d=>{const x=new Date(d);return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`};
 const addDays=(date,n)=>{const d=new Date(date);d.setDate(d.getDate()+n);return d};
-const today=()=>iso(new Date());
+const appDayDate=()=>{const d=new Date();if(d.getHours()<4)d.setDate(d.getDate()-1);return d};
+const today=()=>iso(appDayDate());
 const wd=d=>['日','月','火','水','木','金','土'][new Date(d+'T00:00:00').getDay()];
 const fmt=d=>{if(!d)return 'なし';const x=new Date(d+'T00:00:00');return `${x.getMonth()+1}/${x.getDate()}（${wd(d)}）`};
 
@@ -174,7 +175,7 @@ let addGesture={timer:null,holding:false};
 
 function seed(){
   const t=today();
-  const d=n=>iso(addDays(new Date(),n));
+  const d=n=>iso(addDays(appDayDate(),n));
   return {tags:JSON.parse(JSON.stringify(DEFAULT_TAGS)),quickTags:['work','home','play','goal'],tasks:[
     task('企画書の修正を終わらせる','work','hh',d(0),'1800',d(0),50,45),
     task('保険について比較して候補を3つに絞る','goal','hl',d(2),'',d(0),50,40),

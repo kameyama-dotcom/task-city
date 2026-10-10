@@ -1912,7 +1912,7 @@
   syncAllRecurringV13();
 
   function defaultRecurDraftV13(){
-    const d=new Date();
+    const d=dateV13(currentDayV13());
     return {
       type:'daily',
       weekdays:[d.getDay()],
@@ -2599,6 +2599,501 @@
     if(document.visibilityState==='visible' && syncAllRecurringV13()) render();
   });
 
+  window.__taskCitySyncRecurringV13 = syncAllRecurringV13;
   render();
   console.info(`[Task City] patch ${PATCH_VERSION_V13} loaded`);
+})();
+/* === v0.14 : 04:00 day boundary + daily filter + parent planning lock === */
+(() => {
+  const PATCH_VERSION_V14 = '0.14.0';
+  const DAILY_FILTER_KEY = 'taskCityDailyFilterV1';
+  const DAY_MS_V14 = 86400000;
+
+  const style = document.createElement('style');
+  style.textContent = `
+    .today-filter-scroll .daily-special{
+      border-style:dashed;
+      margin-left:2px;
+    }
+    .today-filter-scroll .daily-special.on{
+      border-style:solid;
+      background:#fff7e9;
+      border-color:#f2c768;
+      color:#8a6420;
+      box-shadow:inset 0 0 0 1px #f2c768;
+    }
+    .parent-plan-locked{
+      border:1px solid #d8e1e1;
+      border-radius:14px;
+      background:#f5f7f7;
+      color:var(--muted);
+      padding:11px 12px;
+      font-size:12px;
+      line-height:1.55;
+      font-weight:800;
+    }
+  `;
+  document.head.appendChild(style);
+
+  function logicalDayFromTimestampV14(value){
+    const d=new Date(value);
+    d.setHours(d.getHours()-4);
+    return iso(d);
+  }
+
+  function dayDiffV14(a,b){
+    return Math.round(
+      (new Date(a+'T00:00:00') - new Date(b+'T00:00:00')) / DAY_MS_V14
+    );
+  }
+
+  function syncRecurringV14(){
+    try{
+      return !!window.__taskCitySyncRecurringV13?.();
+    }catch(e){
+      return false;
+    }
+  }
+
+  function unfinishedChildrenV14(parentId){
+    return state.tasks.filter(t=>t.parentId===parentId && !t.completedAt);
+  }
+
+  function parentPlanningLockedV14(t){
+    return !!t && unfinishedChildrenV14(t.id).length>0;
+  }
+
+  function normalizeParentPlanningV14(){
+    let changed=false;
+    state.tasks.forEach(t=>{
+      if(parentPlanningLockedV14(t) && (t.planDate || t.planTime)){
+        t.planDate='';
+        t.planTime='';
+        changed=true;
+      }
+    });
+    if(changed) save();
+    return changed;
+  }
+
+  function loadDailyFilterV14(){
+    try{
+      const raw=localStorage.getItem(DAILY_FILTER_KEY);
+      return raw===null ? false : raw==='1';
+    }catch(e){
+      return false;
+    }
+  }
+
+  function saveDailyFilterV14(){
+    try{
+      localStorage.setItem(DAILY_FILTER_KEY, ui.dailyFilterOnV14 ? '1' : '0');
+    }catch(e){}
+  }
+
+  ui.dailyFilterOnV14 = loadDailyFilterV14();
+
+  function hiddenTagsV14(){
+    return new Set((ui.todayHiddenTags||[]).filter(k=>TAGS[k]));
+  }
+
+  function selectedTagCountV14(){
+    const hidden=hiddenTagsV14();
+    return Object.keys(TAGS).filter(k=>!hidden.has(k)).length;
+  }
+
+  function visibleByTodayFiltersV14(t){
+    const hidden=hiddenTagsV14();
+    const selectedCount=selectedTagCountV14();
+    const isDaily=t?.recurrence?.type==='daily';
+
+    if(isDaily){
+      if(!ui.dailyFilterOnV14) return false;
+      if(selectedCount===0) return true;
+      return !hidden.has(t.tag);
+    }
+
+    if(selectedCount===0) return false;
+    return !hidden.has(t.tag);
+  }
+
+  function tagFilterHtmlV14(){
+    const hidden=hiddenTagsV14();
+    const ids=Object.keys(TAGS);
+    const allOn=ids.every(k=>!hidden.has(k));
+
+    return `<div class="today-filter-wrap">
+      <div class="today-filter-title">表示するタグ</div>
+      <div class="today-filter-scroll">
+        <button class="today-tag-chip all ${allOn?'on':''}" data-tag-filter-all="1">全部</button>
+        ${ids.map(k=>{
+          const v=TAGS[k],on=!hidden.has(k);
+          return `<button class="today-tag-chip ${on?'on':''}" data-tag-filter="${escAttr(k)}">${esc(v.icon)} ${esc(v.name)}</button>`;
+        }).join('')}
+        <button class="today-tag-chip daily-special ${ui.dailyFilterOnV14?'on':''}" data-daily-filter="1">🔁 毎日</button>
+      </div>
+    </div>`;
+  }
+
+  function prioritySortV14(a,b){
+    const q={hh:0,hl:1,lh:2,ll:3};
+    const qa=q[a.quad]??9,qb=q[b.quad]??9;
+    if(qa!==qb) return qa-qb;
+
+    const deadlineValue=x=>{
+      if(!x.deadline) return Number.MAX_SAFE_INTEGER;
+      const tm=normTime(x.deadlineTime||'2359')||'2359';
+      return Number(x.deadline.replaceAll('-','')+tm);
+    };
+    const da=deadlineValue(a),db=deadlineValue(b);
+    if(da!==db) return da-db;
+
+    const pt=x=>x.planTime?Number(normTime(x.planTime)):9999;
+    if(pt(a)!==pt(b)) return pt(a)-pt(b);
+
+    return new Date(a.createdAt)-new Date(b.createdAt);
+  }
+
+  function targetDayV14(){
+    return iso(addDays(new Date(today()+'T00:00:00'),ui.todayDayOffset||0));
+  }
+
+  function isTargetV14(t,day){
+    return t.planDate===day || t.deadline===day;
+  }
+
+  // A parent with unfinished children is a container, not an executable task.
+  unplanned = function(){
+    normalizeParentPlanningV14();
+    return active().filter(t=>!t.planDate && !parentPlanningLockedV14(t));
+  };
+
+  todayTasks = function(){
+    syncRecurringV14();
+    normalizeParentPlanningV14();
+    const day=targetDayV14();
+    return active()
+      .filter(t=>
+        !parentPlanningLockedV14(t) &&
+        visibleByTodayFiltersV14(t) &&
+        isTargetV14(t,day)
+      )
+      .sort(prioritySortV14);
+  };
+
+  function pastTasksV14(){
+    if((ui.todayDayOffset||0)!==0) return [];
+    const day=today();
+
+    return active().filter(t=>{
+      if(parentPlanningLockedV14(t)) return false;
+      if(!visibleByTodayFiltersV14(t)) return false;
+      if(isTargetV14(t,day)) return false;
+      return (t.deadline&&t.deadline<day)||(t.planDate&&t.planDate<day);
+    }).sort((a,b)=>{
+      const ad=a.deadline||a.planDate||'9999-99-99';
+      const bd=b.deadline||b.planDate||'9999-99-99';
+      if(ad!==bd) return ad.localeCompare(bd);
+      return prioritySortV14(a,b);
+    });
+  }
+
+  function pastReasonV14(t){
+    const day=today();
+    if(t.deadline&&t.deadline<day){
+      const days=Math.max(1,-dayDiffV14(t.deadline,day));
+      return `〆切 ${days}日超過`;
+    }
+    if(t.planDate&&t.planDate<day){
+      return `実行予定 ${fmt(t.planDate)} 未完了`;
+    }
+    return '未完了';
+  }
+
+  function recurrenceMetaV14(t){
+    const r=t?.recurrence;
+    if(!r) return '';
+    const label=r.type==='daily'
+      ?'毎日'
+      :r.type==='weekly'
+        ?`毎週 ${['日','月','火','水','木','金','土'].filter((_,i)=>(r.weekdays||[]).includes(i)).join('・')}`
+        :`毎月 ${(r.monthDays||[]).join('・')}日`;
+    const miss=(r.missCount||0)>0?` <span class="miss-badge">❌${r.missCount}</span>`:'';
+    return `<span class="recurring-meta">🔁 ${esc(label)}${miss}</span>`;
+  }
+
+  function pastCardHtmlV14(t){
+    const tag=safeTag(t.tag);
+    const parent=t.parentId?state.tasks.find(x=>x.id===t.parentId):null;
+
+    return `<article class="task-card" data-task="${t.id}" style="--accent:${QUADS[t.quad].color}">
+      <div class="task-line">
+        <span class="priority-icons">${priorityIcons(t.quad)}</span>
+        <span class="task-tag-only" title="${escAttr(tag.name)}">${tag.icon}</span>
+        <span class="task-title-inline">${esc(t.content)}</span>
+        <span class="points">★${t.points}</span>
+      </div>
+      <div class="task-meta">
+        ${t.recurrence?recurrenceMetaV14(t):''}
+        ${parent?`<span class="child-parent-meta">↳ ${esc(parent.content)}</span>`:''}
+        <span class="past-reason">${esc(pastReasonV14(t))}</span>
+        ${t.minutes?`<span>予測 ${t.minutes}分</span>`:''}
+      </div>
+    </article>`;
+  }
+
+  function doneCountV14(day){
+    let total=0;
+
+    state.tasks.forEach(t=>{
+      if(!visibleByTodayFiltersV14(t)) return;
+
+      if(!t.recurrence){
+        if(
+          t.completedAt &&
+          logicalDayFromTimestampV14(t.completedAt)===day &&
+          isTargetV14(t,day)
+        ){
+          total++;
+        }
+        return;
+      }
+
+      (t.recurrence.history||[]).forEach(h=>{
+        if(h.status!=='done'||!h.completedAt) return;
+        if(logicalDayFromTimestampV14(h.completedAt)!==day) return;
+        if((h.planDate||h.scheduledDate)===day) total++;
+      });
+    });
+
+    return total;
+  }
+
+  todayHtml = function(){
+    syncRecurringV14();
+    normalizeParentPlanningV14();
+
+    const offset=ui.todayDayOffset||0;
+    const day=targetDayV14();
+    const ts=todayTasks();
+    const past=pastTasksV14();
+    const done=doneCountV14(day);
+    const up=unplanned();
+    const label=offset===0?'今日':'明日';
+
+    const pastHtml=offset===0&&past.length?`
+      <section class="overdue-block">
+        <div class="overdue-head"><span>⚠️ 過去のタスク</span><span class="overdue-count">${past.length}</span></div>
+        <div class="overdue-cards">${past.map(pastCardHtmlV14).join('')}</div>
+      </section>`:'';
+
+    const cards=ts.length
+      ?ts.map(t=>cardHtml(t,false)).join('')
+      :`<div class="panel empty">☕<br><span class="subtle">選択条件の${label}のタスクはありません</span></div>`;
+
+    return `<div class="today-no-city-spacer"></div>
+      <div class="day-switch">
+        <button data-day-offset="0" class="${offset===0?'active':''}">今日</button>
+        <button data-day-offset="1" class="${offset===1?'active':''}">明日</button>
+      </div>
+      ${tagFilterHtmlV14()}
+      ${pastHtml}
+      <div class="today-strip">
+        <span class="today-count">${label}のタスク　${done}/${ts.length+done}</span>
+        <button class="inbox-mini ${needsPlanAttention(up)?'warn':''}" data-view="plan" title="未計画">未 ${up.length}</button>
+      </div>
+      <div class="today-all-note">優先度順 · すべて表示</div>
+      <div class="cards">${cards}</div>`;
+  };
+
+  // Deadline wording also follows the 04:00 app day.
+  compactDeadline = function(t){
+    if(!t.deadline) return {text:'',hot:false};
+    const diff=dayDiffV14(t.deadline,today());
+    const time=t.deadlineTime?' '+hhmm(t.deadlineTime):'';
+
+    if(diff<0) return {text:`〆切 ${Math.abs(diff)}日超過`,hot:true};
+    if(diff===0) return {text:`〆切 ${time.trim()||'今日'}`,hot:true};
+    if(diff===1) return {text:`〆切 明日${time}`,hot:true};
+
+    const x=new Date(t.deadline+'T00:00:00');
+    return {text:`〆切 ${x.getMonth()+1}/${x.getDate()}${time}`,hot:diff<=3};
+  };
+
+  deadlineLabel = function(t){
+    if(!t.deadline) return '〆切なし';
+    const diff=dayDiffV14(t.deadline,today());
+
+    if(diff<0) return `${Math.abs(diff)}日超過`;
+    if(diff===0) return `〆切 今日${t.deadlineTime?' '+hhmm(t.deadlineTime):''}`;
+    if(diff===1) return `〆切 明日${t.deadlineTime?' '+hhmm(t.deadlineTime):''}`;
+    return `〆切 ${fmt(t.deadline)}${t.deadlineTime?' '+hhmm(t.deadlineTime):''}`;
+  };
+
+  // Planning also uses the logical app day, not calendar midnight.
+  quickPlan = function(id,delta){
+    const t=state.tasks.find(x=>x.id===id);
+    if(!t) return;
+    if(parentPlanningLockedV14(t)) return;
+
+    const base=new Date(today()+'T00:00:00');
+    t.planDate=iso(addDays(base,Math.max(0,delta)));
+    save();
+    render();
+  };
+
+  aiPlan = function(){
+    let offset=0;
+    const base=new Date(today()+'T00:00:00');
+
+    unplanned().forEach(t=>{
+      const dl=t.deadline?new Date(t.deadline+'T00:00:00'):null;
+      let candidate=addDays(base,offset%4);
+      if(dl&&candidate>dl) candidate=dl;
+      t.planDate=iso(candidate);
+      offset++;
+    });
+
+    save();
+    render();
+  };
+
+  planHtml = function(){
+    syncRecurringV14();
+    normalizeParentPlanningV14();
+
+    const up=unplanned();
+    const base=new Date(today()+'T00:00:00');
+    const dates=[0,1,2,3].map(n=>iso(addDays(base,n)));
+
+    return `<div class="plan-top">
+      <span class="icon-heading">📅 計画</span>
+      <span class="inbox-mini ${needsPlanAttention(up)?'warn':''}" title="未計画">未 ${up.length}</span>
+    </div>
+    <section class="panel">
+      <div class="load-grid">
+        ${dates.map(d=>{
+          const a=active().filter(t=>!parentPlanningLockedV14(t)&&t.planDate===d);
+          const m=a.reduce((s,t)=>s+(t.minutes||0),0);
+          return `<div class="load-day">
+            <b>${new Date(d+'T00:00:00').getMonth()+1}/${new Date(d+'T00:00:00').getDate()}</b>
+            <small>${a.length}<br>${fmtMin(m)}</small>
+          </div>`;
+        }).join('')}
+      </div>
+    </section>
+    <section class="panel">
+      <div class="section-title" style="margin-top:0">
+        <span>未 ${up.length}</span>
+        <button id="aiPlan" class="ghost" title="AIで日程案">✨</button>
+      </div>
+      ${up.map(t=>`<div class="list-row plan-row" data-plan="${t.id}" style="--accent:${QUADS[t.quad].color}">
+        <div class="list-title">${safeTag(t.tag).icon} ${esc(safeTag(t.tag).name)} ${priorityIcons(t.quad)}　${esc(t.content)}</div>
+        <div class="list-meta">
+          <span>${compactDeadline(t).text||'∞'}</span>
+          <span>予測 ${t.minutes||'?'}分</span>
+          <span>★${t.points}</span>
+        </div>
+        <div class="row" style="margin-top:9px">
+          <button class="ghost shift-plan" data-id="${t.id}" data-d="-1">−</button>
+          <button class="ghost pick-plan" data-id="${t.id}" title="予定日を決める">📅</button>
+          <button class="ghost shift-plan" data-id="${t.id}" data-d="1">＋</button>
+        </div>
+      </div>`).join('')||'<div class="empty">🎉</div>'}
+    </section>`;
+  };
+
+  const openDateBeforeV14 = openDate;
+  openDate = function(id){
+    const t=state.tasks.find(x=>x.id===id);
+    if(parentPlanningLockedV14(t)){
+      ui.snack={text:'子タスクが残っている間、親の実行予定日は設定しません',id:null};
+      render();
+      setTimeout(()=>{
+        if(ui.snack&&!ui.snack.id){
+          ui.snack=null;
+          render();
+        }
+      },2800);
+      return;
+    }
+    openDateBeforeV14(id);
+  };
+
+  // Detail screen: hide execution scheduling while child tasks remain.
+  const bindDetailBeforeV14 = bindDetail;
+  bindDetail = function(){
+    bindDetailBeforeV14();
+    const t=state.tasks.find(x=>x.id===ui.detailId);
+    if(!t) return;
+
+    if(parentPlanningLockedV14(t)){
+      const caption=$('.plan-caption');
+      const section=caption?.closest('.detail-section');
+      if(section){
+        section.innerHTML=`<div class="parent-plan-locked">
+          子タスクが残っている間、親タスクの実行予定日は設定しません。<br>
+          親には〆切だけを持たせ、実行予定日は子タスクごとに決めます。
+        </div>`;
+      }
+    }
+  };
+
+  // "今日" in task creation also respects the 04:00 boundary.
+  const bindAddBeforeV14 = bindAdd;
+  bindAdd = function(){
+    bindAddBeforeV14();
+
+    if($('#draftToday')){
+      $('#draftToday').onclick=()=>{
+        const d=new Date(today()+'T00:00:00');
+        ui.draft.year=d.getFullYear();
+        ui.draft.dateRaw=String(d.getMonth()+1)+String(d.getDate()).padStart(2,'0');
+        render();
+      };
+    }
+  };
+
+  // Normalize parents before every paint, so setting an existing task as a parent
+  // also immediately removes its old execution date.
+  const renderBeforeV14 = render;
+  render = function(){
+    normalizeParentPlanningV14();
+    renderBeforeV14();
+  };
+
+  const bindBeforeV14 = bind;
+  bind = function(){
+    bindBeforeV14();
+
+    const daily=$('[data-daily-filter]');
+    if(daily){
+      daily.onclick=()=>{
+        ui.dailyFilterOnV14=!ui.dailyFilterOnV14;
+        saveDailyFilterV14();
+        render();
+      };
+    }
+  };
+
+  // If the app stays open across 04:00, refresh automatically.
+  function scheduleNextBoundaryV14(){
+    const now=new Date();
+    const next=new Date(now);
+    next.setHours(4,0,2,0);
+    if(next<=now) next.setDate(next.getDate()+1);
+
+    setTimeout(()=>{
+      syncRecurringV14();
+      render();
+      scheduleNextBoundaryV14();
+    },Math.max(1000,next-now));
+  }
+
+  syncRecurringV14();
+  normalizeParentPlanningV14();
+  scheduleNextBoundaryV14();
+  render();
+
+  console.info(`[Task City] patch ${PATCH_VERSION_V14} loaded`);
 })();
