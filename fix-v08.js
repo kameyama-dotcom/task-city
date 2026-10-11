@@ -3097,3 +3097,244 @@
 
   console.info(`[Task City] patch ${PATCH_VERSION_V14} loaded`);
 })();
+/* === v0.15 : daily toggle placement + list filters + task memo === */
+(() => {
+  const PATCH_VERSION_V15 = '0.15.0';
+
+  const style = document.createElement('style');
+  style.textContent = `
+    .day-switch{
+      align-items:center;
+    }
+    .day-switch .daily-mode-toggle{
+      margin-left:7px;
+      border:1px dashed #e4b94e;
+      background:#fff;
+      color:#8a6420;
+      white-space:nowrap;
+    }
+    .day-switch .daily-mode-toggle.on{
+      border-style:solid;
+      background:#fff3d7;
+      color:#76520e;
+      box-shadow:inset 0 0 0 1px #e4b94e;
+    }
+    .list-filter-block{
+      margin:0 0 10px;
+    }
+    .list-filter-head{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      margin:0 2px 5px;
+    }
+    .list-filter-head span{
+      color:var(--muted);
+      font-size:12px;
+      font-weight:850;
+    }
+    .list-daily-toggle{
+      border:1px dashed #e4b94e;
+      background:#fff;
+      color:#8a6420;
+      border-radius:999px;
+      padding:7px 11px;
+      font-size:11px;
+      font-weight:950;
+      white-space:nowrap;
+    }
+    .list-daily-toggle.on{
+      border-style:solid;
+      background:#fff3d7;
+      box-shadow:inset 0 0 0 1px #e4b94e;
+    }
+    .task-memo{
+      width:100%;
+      min-height:88px;
+      resize:vertical;
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:11px 12px;
+      background:#fff;
+      color:var(--ink);
+      font:inherit;
+      font-size:14px;
+      line-height:1.55;
+    }
+    .task-memo:focus{
+      outline:3px solid rgba(25,197,199,.14);
+      border-color:#19c5c7;
+    }
+    .memo-mark{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      margin-left:4px;
+      font-size:11px;
+      opacity:.72;
+      vertical-align:middle;
+    }
+    @media(max-width:560px){
+      .day-switch{
+        width:100%;
+      }
+      .day-switch .daily-mode-toggle{
+        margin-left:auto;
+        padding-left:12px;
+        padding-right:12px;
+      }
+    }
+  `;
+  document.head.appendChild(style);
+
+  let normalizedMemoV15=false;
+  state.tasks.forEach(t=>{
+    if(typeof t.memo!=='string'){
+      t.memo='';
+      normalizedMemoV15=true;
+    }
+  });
+  if(normalizedMemoV15) save();
+
+  function hiddenTagsV15(){
+    return new Set((ui.todayHiddenTags||[]).filter(k=>TAGS[k]));
+  }
+
+  function selectedTagCountV15(){
+    const hidden=hiddenTagsV15();
+    return Object.keys(TAGS).filter(k=>!hidden.has(k)).length;
+  }
+
+  function visibleBySharedFiltersV15(t){
+    const hidden=hiddenTagsV15();
+    const selectedCount=selectedTagCountV15();
+    const isDaily=t?.recurrence?.type==='daily';
+
+    if(isDaily){
+      if(!ui.dailyFilterOnV14) return false;
+      if(selectedCount===0) return true;
+      return !hidden.has(t.tag);
+    }
+
+    if(selectedCount===0) return false;
+    return !hidden.has(t.tag);
+  }
+
+  function tagFilterOnlyHtmlV15(){
+    const hidden=hiddenTagsV15();
+    const ids=Object.keys(TAGS);
+    const allOn=ids.every(k=>!hidden.has(k));
+
+    return `<div class="today-filter-wrap">
+      <div class="today-filter-title">表示するタグ</div>
+      <div class="today-filter-scroll">
+        <button class="today-tag-chip all ${allOn?'on':''}" data-tag-filter-all="1">全部</button>
+        ${ids.map(k=>{
+          const v=TAGS[k],on=!hidden.has(k);
+          return `<button class="today-tag-chip ${on?'on':''}" data-tag-filter="${escAttr(k)}">${esc(v.icon)} ${esc(v.name)}</button>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }
+
+  // Move "毎日" out of the tag row and place it beside 今日/明日.
+  const todayHtmlBeforeV15 = todayHtml;
+  todayHtml = function(){
+    let html=todayHtmlBeforeV15();
+
+    // Remove the old daily chip from the tag row.
+    html=html.replace(
+      /<button class="today-tag-chip daily-special[^"]*" data-daily-filter="1">🔁 毎日<\/button>/,
+      ''
+    );
+
+    // Add the independent toggle to the right side of 今日/明日.
+    const daily=`<button class="daily-mode-toggle ${ui.dailyFilterOnV14?'on':''}" data-daily-filter="1">🔁 毎日</button>`;
+    html=html.replace(
+      /(<button data-day-offset="1"[^>]*>明日<\/button>)\s*<\/div>/,
+      `$1${daily}</div>`
+    );
+
+    return html;
+  };
+
+  // Filter the list with the same tag/daily state used on 今日/明日.
+  const activeBeforeV15 = active;
+  const listHtmlBeforeV15 = listHtml;
+  listHtml = function(){
+    let html='';
+    active = function(){
+      return activeBeforeV15().filter(visibleBySharedFiltersV15);
+    };
+    try{
+      html=listHtmlBeforeV15();
+    }finally{
+      active=activeBeforeV15;
+    }
+
+    const controls=`<div class="list-filter-block">
+      <div class="list-filter-head">
+        <span>表示するタグ</span>
+        <button class="list-daily-toggle ${ui.dailyFilterOnV14?'on':''}" data-daily-filter="1">🔁 毎日</button>
+      </div>
+      ${tagFilterOnlyHtmlV15()}
+    </div>`;
+
+    return controls+html;
+  };
+
+  // Memo field in task detail.
+  const detailModalBeforeV15 = detailModal;
+  detailModal = function(){
+    const t=state.tasks.find(x=>x.id===ui.detailId);
+    let html=detailModalBeforeV15();
+    if(!t) return html;
+
+    const memo=`<div class="field">
+      <div class="field-title">メモ</div>
+      <textarea id="taskMemo" class="task-memo" placeholder="補足、手順、URLなど">${esc(t.memo||'')}</textarea>
+    </div>`;
+
+    html=html.replace('<div class="tag-pills icon-only">',memo+'<div class="tag-pills icon-only">');
+    return html;
+  };
+
+  const bindDetailBeforeV15 = bindDetail;
+  bindDetail = function(){
+    bindDetailBeforeV15();
+    const t=state.tasks.find(x=>x.id===ui.detailId);
+    if(!t) return;
+
+    const memo=$('#taskMemo');
+    if(memo){
+      memo.oninput=e=>{
+        t.memo=e.target.value;
+        save();
+      };
+    }
+  };
+
+  // Small memo marker on cards and list/matrix items.
+  const bindBeforeV15 = bind;
+  bind = function(){
+    bindBeforeV15();
+
+    $$('[data-task]').forEach(el=>{
+      const t=state.tasks.find(x=>x.id===el.dataset.task);
+      if(!t || !String(t.memo||'').trim()) return;
+
+      const target=
+        el.querySelector('.task-title-inline') ||
+        el.querySelector('.list-v10-title') ||
+        el;
+
+      if(target && !target.querySelector?.('.memo-mark')){
+        target.insertAdjacentHTML('beforeend','<span class="memo-mark" title="メモあり">📝</span>');
+      }
+    });
+  };
+
+  render();
+  console.info(`[Task City] patch ${PATCH_VERSION_V15} loaded`);
+})();
