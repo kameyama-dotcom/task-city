@@ -3338,3 +3338,511 @@
   render();
   console.info(`[Task City] patch ${PATCH_VERSION_V15} loaded`);
 })();
+/* === v0.16 : sticky task UI + filter controls + remove duration UI === */
+(() => {
+  const PATCH_VERSION_V16 = '0.16.0';
+  const PERIODIC_FILTER_KEY = 'taskCityListPeriodicFilterV1';
+
+  const style = document.createElement('style');
+  style.textContent = `
+    .day-mode-row-v16{display:flex;align-items:center;gap:7px;margin:2px 0 7px}
+    .day-mode-row-v16 .day-switch{margin:0!important;width:auto!important;flex:0 0 auto}
+    .day-mode-row-v16 .daily-mode-toggle{
+      margin:0!important;border:1px dashed #e4b94e;background:#fff;color:#8a6420;
+      border-radius:999px;padding:8px 12px;font-size:12px;font-weight:950;white-space:nowrap
+    }
+    .day-mode-row-v16 .daily-mode-toggle.on{
+      border-style:solid;background:#fff3d7;color:#76520e;box-shadow:inset 0 0 0 1px #e4b94e
+    }
+    .today-fixed-v16{
+      position:sticky;top:44px;z-index:4;background:linear-gradient(180deg,var(--bg) 88%,rgba(255,253,248,0));
+      padding:2px 0 9px
+    }
+    .today-fixed-v16 .today-filter-wrap{margin-bottom:7px}
+    .today-scroll-v16{padding-bottom:88px}
+    .detail-sheet-v16{
+      max-height:92dvh!important;overflow:hidden!important;display:flex!important;flex-direction:column!important
+    }
+    .detail-fixed-v16{
+      flex:0 0 auto;background:var(--surface);padding-bottom:8px;border-bottom:1px solid var(--line)
+    }
+    .detail-fixed-v16 .field{margin-top:0}
+    .detail-fixed-v16 .tag-pills{margin-bottom:2px}
+    .detail-scroll-v16{
+      flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:2px 1px 4px
+    }
+    .task-memo{font-size:16px!important;line-height:1.55}
+    .list-filter-actions-v16{display:flex;gap:6px;align-items:center}
+    .list-periodic-toggle{
+      border:1px dashed #8ebfd0;background:#fff;color:#3d7080;border-radius:999px;
+      padding:7px 11px;font-size:11px;font-weight:950;white-space:nowrap
+    }
+    .list-periodic-toggle.on{
+      border-style:solid;background:#eaf7fb;box-shadow:inset 0 0 0 1px #8ebfd0
+    }
+    .detail-section .row:has(#minutes),
+    .plan-edit-box .field:has(#dateMinutes){display:none!important}
+    @media(max-width:560px){
+      .today-fixed-v16{top:43px}
+      .day-mode-row-v16{gap:6px}
+      .day-mode-row-v16 .daily-mode-toggle{padding:7px 11px}
+      .detail-sheet-v16{height:92dvh!important}
+      .task-memo{font-size:16px!important}
+    }
+  `;
+  document.head.appendChild(style);
+
+  function saveHiddenTagsV16(){
+    try{localStorage.setItem('taskCityTodayHiddenTagsV1',JSON.stringify(ui.todayHiddenTags||[]))}catch(e){}
+  }
+  function hiddenTagsV16(){return new Set((ui.todayHiddenTags||[]).filter(k=>TAGS[k]))}
+  function allTagsOnV16(){
+    const hidden=hiddenTagsV16();
+    return Object.keys(TAGS).every(k=>!hidden.has(k));
+  }
+  function loadPeriodicV16(){
+    try{return localStorage.getItem(PERIODIC_FILTER_KEY)==='1'}catch(e){return false}
+  }
+  function savePeriodicV16(){
+    try{localStorage.setItem(PERIODIC_FILTER_KEY,ui.listPeriodicOnlyV16?'1':'0')}catch(e){}
+  }
+  ui.listPeriodicOnlyV16=loadPeriodicV16();
+
+  function selectedTagCountV16(){
+    const hidden=hiddenTagsV16();
+    return Object.keys(TAGS).filter(k=>!hidden.has(k)).length;
+  }
+  function tagMatchV16(t){return !hiddenTagsV16().has(t.tag)}
+
+  function listVisibleV16(t){
+    const selectedCount=selectedTagCountV16();
+    const daily=t?.recurrence?.type==='daily';
+    const periodic=t?.recurrence && ['weekly','monthly'].includes(t.recurrence.type);
+
+    if(ui.listPeriodicOnlyV16){
+      if(periodic) return selectedCount===0 ? true : tagMatchV16(t);
+      if(daily && ui.dailyFilterOnV14) return selectedCount===0 ? true : tagMatchV16(t);
+      return false;
+    }
+
+    if(daily){
+      if(!ui.dailyFilterOnV14) return false;
+      return selectedCount===0 ? true : tagMatchV16(t);
+    }
+
+    if(selectedCount===0) return false;
+    return tagMatchV16(t);
+  }
+
+  function recurLabelV16(t){
+    const r=t?.recurrence;
+    if(!r) return '';
+    if(r.type==='daily') return '🔁 毎日';
+    if(r.type==='weekly'){
+      const names=['日','月','火','水','木','金','土'];
+      return `🔁 毎週 ${(r.weekdays||[]).map(n=>names[n]).join('・')}`;
+    }
+    return `🔁 毎月 ${(r.monthDays||[]).join('・')}日`;
+  }
+
+  function listSortV16(a,b){
+    const day=today();
+    const overdue=x=>((x.deadline&&x.deadline<day)||(x.planDate&&x.planDate<day))?0:1;
+    if(overdue(a)!==overdue(b)) return overdue(a)-overdue(b);
+    const target=x=>(x.planDate===day||x.deadline===day)?0:1;
+    if(target(a)!==target(b)) return target(a)-target(b);
+    const q={hh:0,hl:1,lh:2,ll:3};
+    if((q[a.quad]??9)!==(q[b.quad]??9)) return (q[a.quad]??9)-(q[b.quad]??9);
+    const ad=a.planDate||a.deadline||'9999-99-99';
+    const bd=b.planDate||b.deadline||'9999-99-99';
+    if(ad!==bd) return ad.localeCompare(bd);
+    return new Date(a.createdAt)-new Date(b.createdAt);
+  }
+
+  function listRowV16(t){
+    const tag=safeTag(t.tag);
+    const day=today();
+    const overdue=(t.deadline&&t.deadline<day)||(t.planDate&&t.planDate<day);
+    const bits=[];
+
+    if(t.recurrence?.type==='daily'){
+      bits.push(recurLabelV16(t));
+    }else{
+      if(t.planDate) bits.push(`予定 ${fmt(t.planDate)}${t.planTime?' '+hhmm(t.planTime):''}`);
+      else bits.push('未計画');
+      if(t.recurrence) bits.push(recurLabelV16(t));
+    }
+    if(t.deadline) bits.push(deadlineLabel(t));
+
+    return `<button class="list-v10-row" data-task="${t.id}">
+      <span>${priorityIcons(t.quad)}</span>
+      <span class="list-v10-main">
+        <span class="list-v10-title">${tag.icon} ${esc(t.content)}${String(t.memo||'').trim()?'<span class="memo-mark" title="メモあり">📝</span>':''}</span>
+        <span class="list-v10-meta ${overdue?'list-overdue-text':''}">${bits.map(esc).join(' · ')}</span>
+      </span>
+      <span class="list-v10-points">★${t.points}</span>
+    </button>`;
+  }
+
+  function tagFilterOnlyV16(){
+    const hidden=hiddenTagsV16();
+    const ids=Object.keys(TAGS);
+    const allOn=ids.every(k=>!hidden.has(k));
+
+    return `<div class="today-filter-wrap">
+      <div class="today-filter-title">表示するタグ</div>
+      <div class="today-filter-scroll">
+        <button class="today-tag-chip all ${allOn?'on':''}" data-tag-filter-all="1">全部</button>
+        ${ids.map(k=>{
+          const v=TAGS[k],on=!hidden.has(k);
+          return `<button class="today-tag-chip ${on?'on':''}" data-tag-filter="${escAttr(k)}">${esc(v.icon)} ${esc(v.name)}</button>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }
+
+  const todayHtmlBeforeV16=todayHtml;
+  todayHtml=function(){
+    const holder=document.createElement('div');
+    holder.innerHTML=todayHtmlBeforeV16();
+
+    const daySwitch=holder.querySelector('.day-switch');
+    const daily=daySwitch?.querySelector('[data-daily-filter]');
+    if(daySwitch&&daily){
+      daily.remove();
+      const row=document.createElement('div');
+      row.className='day-mode-row-v16';
+      daySwitch.parentNode.insertBefore(row,daySwitch);
+      row.appendChild(daySwitch);
+      row.appendChild(daily);
+    }
+
+    const fixed=document.createElement('div');
+    fixed.className='today-fixed-v16';
+    const dayRow=holder.querySelector('.day-mode-row-v16')||holder.querySelector('.day-switch');
+    const filter=holder.querySelector('.today-filter-wrap');
+    const strip=holder.querySelector('.today-strip');
+    if(dayRow) fixed.appendChild(dayRow);
+    if(filter) fixed.appendChild(filter);
+    if(strip) fixed.appendChild(strip);
+
+    const scroll=document.createElement('div');
+    scroll.className='today-scroll-v16';
+    Array.from(holder.children).forEach(node=>scroll.appendChild(node));
+
+    const root=document.createElement('div');
+    root.appendChild(fixed);
+    root.appendChild(scroll);
+    return root.innerHTML;
+  };
+
+  listHtml=function(){
+    const mode=ui.listMode||'rows';
+    const all=active().filter(listVisibleV16).slice().sort(listSortV16);
+
+    const controls=`<div class="list-filter-block">
+      <div class="list-filter-head">
+        <span>表示するタグ</span>
+        <div class="list-filter-actions-v16">
+          <button class="list-daily-toggle ${ui.dailyFilterOnV14?'on':''}" data-daily-filter="1">🔁 毎日</button>
+          <button class="list-periodic-toggle ${ui.listPeriodicOnlyV16?'on':''}" data-periodic-filter="1">🔁 定期</button>
+        </div>
+      </div>
+      ${tagFilterOnlyV16()}
+    </div>`;
+
+    const toggle=`<div class="list-toolbar">
+      <h2>タスク一覧</h2>
+      <div class="list-mode-toggle" role="tablist" aria-label="一覧表示">
+        <button data-list-mode="rows" class="${mode==='rows'?'active':''}">☰ 縦並び</button>
+        <button data-list-mode="matrix" class="${mode==='matrix'?'active':''}">▦ 表</button>
+      </div>
+    </div>`;
+
+    if(mode==='matrix'){
+      return controls+toggle+`<div class="matrix-wrap">
+        <div class="matrix" title="上ほど重要・右ほど緊急">
+          <span class="matrix-y">🧑 ↓　重要度　↑ 👑</span>
+          <span class="matrix-x">🚶 ←　緊急度　→ 🏃</span>
+          ${all.map((t,i)=>matrixTaskHtml(t,i)).join('')}
+        </div>
+        <div class="matrix-count">${all.length}</div>
+      </div>`;
+    }
+
+    return controls+toggle+`<section class="panel list-vertical">
+      ${all.map(listRowV16).join('')||'<div class="empty">条件に合うタスクはありません</div>'}
+    </section>`;
+  };
+
+  const detailModalBeforeV16=detailModal;
+  detailModal=function(){
+    const holder=document.createElement('div');
+    holder.innerHTML=detailModalBeforeV16();
+
+    const sheet=holder.querySelector('.sheet');
+    if(!sheet) return holder.innerHTML;
+    sheet.classList.add('detail-sheet-v16');
+
+    const titleField=holder.querySelector('#taskTitleEdit')?.closest('.field');
+    const tags=sheet.querySelector('.tag-pills.icon-only');
+    const memo=holder.querySelector('#taskMemo')?.closest('.field');
+    const planSection=holder.querySelector('.plan-caption')?.closest('.detail-section');
+    if(memo&&planSection) planSection.insertAdjacentElement('afterend',memo);
+
+    const fixed=document.createElement('div');
+    fixed.className='detail-fixed-v16';
+    if(titleField) fixed.appendChild(titleField);
+    if(tags) fixed.appendChild(tags);
+
+    const scroll=document.createElement('div');
+    scroll.className='detail-scroll-v16';
+    while(sheet.firstChild) scroll.appendChild(sheet.firstChild);
+
+    sheet.appendChild(fixed);
+    sheet.appendChild(scroll);
+    return holder.innerHTML;
+  };
+
+  const cardHtmlBeforeV16=cardHtml;
+  cardHtml=function(t,primary){
+    let html=cardHtmlBeforeV16(t,primary);
+    html=html.replace(/<span>予測\s*[^<]*<\/span>/g,'');
+    return html;
+  };
+
+  const planHtmlBeforeV16=planHtml;
+  planHtml=function(){
+    const holder=document.createElement('div');
+    holder.innerHTML=planHtmlBeforeV16();
+
+    holder.querySelectorAll('.load-day small').forEach(s=>{
+      const first=(s.textContent||'').trim().split(/\s+/)[0]||'0';
+      s.textContent=first;
+    });
+    holder.querySelectorAll('.list-meta span').forEach(s=>{
+      if((s.textContent||'').trim().startsWith('予測')) s.remove();
+    });
+
+    return holder.innerHTML;
+  };
+
+  const bindDetailBeforeV16=bindDetail;
+  bindDetail=function(){
+    bindDetailBeforeV16();
+    const t=state.tasks.find(x=>x.id===ui.detailId);
+    if(!t) return;
+
+    const minutes=$('#minutes');
+    if(minutes){
+      const row=minutes.closest('.row');
+      if(row) row.style.display='none';
+    }
+
+    if(t.recurrence?.type==='daily'){
+      const plan=$('.plan-caption')?.closest('.detail-section');
+      if(plan) plan.style.display='none';
+    }
+  };
+
+  const bindDateBeforeV16=bindDate;
+  bindDate=function(){
+    bindDateBeforeV16();
+    const duration=$('#dateMinutes')?.closest('.field');
+    if(duration) duration.style.display='none';
+  };
+
+  const bindBeforeV16=bind;
+  bind=function(){
+    bindBeforeV16();
+
+    $$('[data-tag-filter-all]').forEach(btn=>{
+      btn.onclick=()=>{
+        const ids=Object.keys(TAGS);
+        ui.todayHiddenTags=allTagsOnV16()?ids:[];
+        saveHiddenTagsV16();
+        render();
+      };
+    });
+
+    $$('[data-periodic-filter]').forEach(btn=>{
+      btn.onclick=()=>{
+        ui.listPeriodicOnlyV16=!ui.listPeriodicOnlyV16;
+        savePeriodicV16();
+        render();
+      };
+    });
+  };
+
+  render();
+  console.info(`[Task City] patch ${PATCH_VERSION_V16} loaded`);
+})();
+/* === v0.17 : remove points concept and simplify records === */
+(() => {
+  const PATCH_VERSION_V17 = '0.17.0';
+
+  const style=document.createElement('style');
+  style.textContent=`
+    .points,.list-v10-points,.point-area,.city-burst{display:none!important}
+    .record-summary-v17{
+      display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px
+    }
+    .record-count-v17{
+      background:var(--surface);border:1px solid var(--line);border-radius:18px;
+      padding:18px 14px;box-shadow:var(--shadow)
+    }
+    .record-count-v17 span{
+      display:block;color:var(--muted);font-size:12px;font-weight:800;margin-bottom:6px
+    }
+    .record-count-v17 b{font-size:28px;line-height:1}
+    .record-tags-v17{
+      display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px
+    }
+    .record-tag-v17{
+      border:1px solid var(--line);border-radius:13px;padding:11px 12px;background:#fff;
+      display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:13px
+    }
+    .record-tag-v17 b{font-size:16px}
+  `;
+  document.head.appendChild(style);
+
+  function logicalDayV17(value){
+    const d=new Date(value);
+    d.setHours(d.getHours()-4);
+    return iso(d);
+  }
+
+  function completionEventsV17(){
+    const events=[];
+    state.tasks.forEach(t=>{
+      if(t.recurrence){
+        (t.recurrence.history||[]).forEach(h=>{
+          if(h.status==='done'&&h.completedAt){
+            events.push({task:t,at:h.completedAt,day:logicalDayV17(h.completedAt)});
+          }
+        });
+      }else if(t.completedAt){
+        events.push({task:t,at:t.completedAt,day:logicalDayV17(t.completedAt)});
+      }
+    });
+    return events;
+  }
+
+  function currentMonthPrefixV17(){return today().slice(0,7)}
+
+  function mondayV17(day=today()){
+    const d=new Date(day+'T00:00:00');
+    const offset=(d.getDay()+6)%7;
+    d.setDate(d.getDate()-offset);
+    return iso(d);
+  }
+
+  function eventsThisMonthV17(){
+    const prefix=currentMonthPrefixV17();
+    return completionEventsV17().filter(e=>e.day.startsWith(prefix));
+  }
+
+  function eventsThisWeekV17(){
+    const start=mondayV17(),end=today();
+    return completionEventsV17().filter(e=>e.day>=start&&e.day<=end);
+  }
+
+  function tagCountV17(tag){
+    return eventsThisMonthV17().filter(e=>e.task.tag===tag).length;
+  }
+
+  const cardHtmlBeforeV17=cardHtml;
+  cardHtml=function(t,primary){
+    let html=cardHtmlBeforeV17(t,primary);
+    html=html.replace(/<span>予測\s*[^<]*<\/span>/g,'');
+    html=html.replace(/<span class="points">.*?<\/span>/g,'');
+    return html;
+  };
+
+  const planHtmlBeforeV17=planHtml;
+  planHtml=function(){
+    let html=planHtmlBeforeV17();
+    html=html.replace(/<span>★[^<]*<\/span>/g,'');
+    html=html.replace(/<span>予測[^<]*<\/span>/g,'');
+    return html;
+  };
+
+  recordHtml=function(){
+    const month=eventsThisMonthV17();
+    const week=eventsThisWeekV17();
+
+    return `<div class="record-summary-v17">
+      <div class="record-count-v17"><span>今月の完了</span><b>${month.length}件</b></div>
+      <div class="record-count-v17"><span>今週の完了</span><b>${week.length}件</b></div>
+    </div>
+
+    <section class="panel">
+      <div class="section-title" style="margin-top:0">今月のタグ別完了数</div>
+      <div class="record-tags-v17">
+        ${Object.entries(TAGS).map(([k,v])=>`
+          <div class="record-tag-v17">
+            <span>${v.icon} ${esc(v.name)}</span>
+            <b>${tagCountV17(k)}</b>
+          </div>`).join('')}
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="data-tools">
+        <div class="data-tools-copy">
+          <b>🛟 データ</b>
+          <span>同じURLで更新する限り、登録したタスクはそのまま残ります。</span>
+        </div>
+        <div>
+          <div class="data-actions">
+            <button id="exportBackup" class="data-btn primary-lite">書き出す</button>
+            <button id="importBackup" class="data-btn">復元</button>
+            <input id="restoreFile" class="restore-input" type="file" accept="application/json,.json">
+          </div>
+          <div class="backup-status">データ形式 v${DATA_VERSION} · ${state.tasks.length}件</div>
+        </div>
+      </div>
+    </section>`;
+  };
+
+  const completeTaskBeforeV17=completeTask;
+  completeTask=function(id){
+    const t=state.tasks.find(x=>x.id===id);
+    completeTaskBeforeV17(id);
+
+    if(ui.snack?.id===id){
+      if(t?.recurrence){
+        const next=t.recurrence?.occurrenceDate;
+        ui.snack.text=next?`✓ 完了　次回 ${fmt(next)}`:'✓ 完了';
+      }else{
+        ui.snack.text='✓ 完了';
+      }
+      ui.cityBurst=null;
+      render();
+    }
+  };
+
+  ensureMonthLifecycle=function(){
+    const mk=currentMonthKey();
+    if(state.monthKey!==mk){
+      state.monthKey=mk;
+      state.landmark=null;
+      state.lastWeeklySeenKey='';
+      save();
+    }
+  };
+
+  maybeOpenWeeklyReport=function(){};
+
+  if(['landmarkPick','weekly','result'].includes(ui.modal)){
+    ui.modal=null;
+  }
+
+  const navHtmlBeforeV17=navHtml;
+  navHtml=function(){
+    return navHtmlBeforeV17().replace('🏙️','📊');
+  };
+
+  render();
+  console.info(`[Task City] patch ${PATCH_VERSION_V17} loaded`);
+})();
