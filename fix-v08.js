@@ -3846,3 +3846,444 @@
   render();
   console.info(`[Task City] patch ${PATCH_VERSION_V17} loaded`);
 })();
+/* === v0.18 : deadline editing + recurring list semantics + child creation flow === */
+(() => {
+  const PATCH_VERSION_V18 = '0.18.0';
+
+  const style=document.createElement('style');
+  style.textContent=`
+    .topbar{background:var(--bg)!important}
+    .today-fixed-v16{
+      background:var(--bg)!important;
+      box-shadow:0 8px 12px rgba(255,253,248,.96);
+    }
+    .today-fixed-v16::before{
+      content:"";
+      position:absolute;
+      left:-16px;
+      right:-16px;
+      top:-18px;
+      height:20px;
+      background:var(--bg);
+      z-index:-1;
+    }
+    .deadline-date-input-v18{
+      min-width:148px;
+      max-width:190px;
+      border:1px solid var(--line);
+      background:#fff;
+      color:var(--ink);
+      border-radius:12px;
+      padding:10px 11px;
+      font-size:16px;
+      font-weight:800;
+      font-family:inherit;
+    }
+    .deadline-none-v18{
+      border:1px solid var(--line);
+      background:#fff;
+      color:var(--muted);
+      border-radius:12px;
+      padding:10px 12px;
+      white-space:nowrap;
+      font-weight:850;
+    }
+    .deadline-focus .row{flex-wrap:wrap}
+    .deadline-none-v18.active{
+      background:#f1f5f5;
+      color:var(--ink);
+      border-color:#c7d1d1;
+    }
+    .add-child-flow-v18{
+      width:100%;
+      margin-top:12px;
+      border:1px dashed #8adfe1;
+      background:#f2fcfc;
+      color:#246c70;
+      border-radius:13px;
+      padding:11px 12px;
+      font-weight:900;
+    }
+    .continue-child-v18{
+      width:100%;
+      margin-top:12px;
+      border:1px solid #9edfe1;
+      background:#effcfc;
+      color:#17666a;
+      border-radius:13px;
+      padding:11px 12px;
+      font-weight:900;
+    }
+    .choice-stack .add-child-again-v18{
+      background:#effcfc;
+      border:1px solid #9edfe1;
+      color:#17666a;
+      border-radius:13px;
+      padding:12px;
+      font-weight:900;
+    }
+    .daily-no-plan-v18 .detail-section:has(.plan-caption),.plan-hidden-daily-v18{display:none!important}
+    @media(max-width:560px){
+      .deadline-date-input-v18{min-width:136px;max-width:170px}
+    }
+  `;
+  document.head.appendChild(style);
+
+  const taskByIdV18=id=>state.tasks.find(t=>t.id===id);
+  const unfinishedChildrenV18=id=>state.tasks.filter(t=>t.parentId===id&&!t.completedAt);
+
+  function showSnackV18(text,ms=2800){
+    ui.snack={text,id:null};
+    render();
+    setTimeout(()=>{
+      if(ui.snack&&!ui.snack.id&&ui.snack.text===text){
+        ui.snack=null;
+        render();
+      }
+    },ms);
+  }
+
+  function saveHiddenTagsV18(){
+    try{localStorage.setItem('taskCityTodayHiddenTagsV1',JSON.stringify(ui.todayHiddenTags||[]))}catch(e){}
+  }
+
+  function hiddenTagsV18(){
+    return new Set((ui.todayHiddenTags||[]).filter(k=>TAGS[k]));
+  }
+
+  function selectedTagsV18(){
+    const hidden=hiddenTagsV18();
+    return Object.keys(TAGS).filter(k=>!hidden.has(k));
+  }
+
+  function listTaskVisibleV18(t){
+    const selected=selectedTagsV18();
+    const noTags=selected.length===0;
+    const tagOn=!hiddenTagsV18().has(t.tag);
+    const recurType=t?.recurrence?.type||'';
+    const isRecurring=!!recurType;
+    const isDaily=recurType==='daily';
+    const dailyOn=!!ui.dailyFilterOnV14;
+    const periodicOn=!!ui.listPeriodicOnlyV16;
+
+    // No normal tags selected: special filters become global views.
+    if(noTags){
+      if(periodicOn) return isRecurring;      // 毎日を含む全定期
+      if(dailyOn) return isDaily;             // 毎日だけ
+      return false;
+    }
+
+    if(!tagOn) return false;
+
+    // A normal tag always shows its ordinary tasks.
+    if(!isRecurring) return true;
+
+    // "定期" includes every recurrence type, including daily.
+    if(periodicOn) return true;
+
+    // "毎日" only adds daily recurrence tasks.
+    if(dailyOn&&isDaily) return true;
+
+    // Recurring tasks stay hidden until a matching special filter is ON.
+    return false;
+  }
+
+  function recurLabelV18(t){
+    const r=t?.recurrence;
+    if(!r) return '';
+    if(r.type==='daily') return '🔁 毎日';
+    if(r.type==='weekly'){
+      const names=['日','月','火','水','木','金','土'];
+      return `🔁 毎週 ${(r.weekdays||[]).map(n=>names[n]).join('・')}`;
+    }
+    return `🔁 毎月 ${(r.monthDays||[]).join('・')}日`;
+  }
+
+  function listSortV18(a,b){
+    const day=today();
+    const overdue=x=>((x.deadline&&x.deadline<day)||(x.planDate&&x.planDate<day))?0:1;
+    if(overdue(a)!==overdue(b)) return overdue(a)-overdue(b);
+    const target=x=>(x.planDate===day||x.deadline===day)?0:1;
+    if(target(a)!==target(b)) return target(a)-target(b);
+    const q={hh:0,hl:1,lh:2,ll:3};
+    if((q[a.quad]??9)!==(q[b.quad]??9)) return (q[a.quad]??9)-(q[b.quad]??9);
+    const ad=a.planDate||a.deadline||'9999-99-99';
+    const bd=b.planDate||b.deadline||'9999-99-99';
+    if(ad!==bd) return ad.localeCompare(bd);
+    return new Date(a.createdAt)-new Date(b.createdAt);
+  }
+
+  function listRowV18(t){
+    const tag=safeTag(t.tag);
+    const day=today();
+    const overdue=(t.deadline&&t.deadline<day)||(t.planDate&&t.planDate<day);
+    const bits=[];
+
+    if(t.recurrence?.type==='daily'){
+      bits.push(recurLabelV18(t));
+    }else{
+      if(t.planDate) bits.push(`予定 ${fmt(t.planDate)}${t.planTime?' '+hhmm(t.planTime):''}`);
+      else bits.push('未計画');
+      if(t.recurrence) bits.push(recurLabelV18(t));
+    }
+    if(t.deadline) bits.push(deadlineLabel(t));
+
+    return `<button class="list-v10-row" data-task="${t.id}">
+      <span>${priorityIcons(t.quad)}</span>
+      <span class="list-v10-main">
+        <span class="list-v10-title">${tag.icon} ${esc(t.content)}${String(t.memo||'').trim()?'<span class="memo-mark" title="メモあり">📝</span>':''}</span>
+        <span class="list-v10-meta ${overdue?'list-overdue-text':''}">${bits.map(esc).join(' · ')}</span>
+      </span>
+    </button>`;
+  }
+
+  function tagFilterOnlyV18(){
+    const hidden=hiddenTagsV18();
+    const ids=Object.keys(TAGS);
+    const allOn=ids.every(k=>!hidden.has(k));
+    return `<div class="today-filter-wrap">
+      <div class="today-filter-title">表示するタグ</div>
+      <div class="today-filter-scroll">
+        <button class="today-tag-chip all ${allOn?'on':''}" data-tag-filter-all="1">全部</button>
+        ${ids.map(k=>{
+          const v=TAGS[k],on=!hidden.has(k);
+          return `<button class="today-tag-chip ${on?'on':''}" data-tag-filter="${escAttr(k)}">${esc(v.icon)} ${esc(v.name)}</button>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }
+
+  // Correct list-filter semantics.
+  listHtml=function(){
+    const mode=ui.listMode||'rows';
+    const all=active().filter(listTaskVisibleV18).slice().sort(listSortV18);
+
+    const controls=`<div class="list-filter-block">
+      <div class="list-filter-head">
+        <span>表示するタグ</span>
+        <div class="list-filter-actions-v16">
+          <button class="list-daily-toggle ${ui.dailyFilterOnV14?'on':''}" data-daily-filter="1">🔁 毎日</button>
+          <button class="list-periodic-toggle ${ui.listPeriodicOnlyV16?'on':''}" data-periodic-filter="1">🔁 定期</button>
+        </div>
+      </div>
+      ${tagFilterOnlyV18()}
+    </div>`;
+
+    const toggle=`<div class="list-toolbar">
+      <h2>タスク一覧</h2>
+      <div class="list-mode-toggle" role="tablist" aria-label="一覧表示">
+        <button data-list-mode="rows" class="${mode==='rows'?'active':''}">☰ 縦並び</button>
+        <button data-list-mode="matrix" class="${mode==='matrix'?'active':''}">▦ 表</button>
+      </div>
+    </div>`;
+
+    if(mode==='matrix'){
+      return controls+toggle+`<div class="matrix-wrap">
+        <div class="matrix" title="上ほど重要・右ほど緊急">
+          <span class="matrix-y">🧑 ↓　重要度　↑ 👑</span>
+          <span class="matrix-x">🚶 ←　緊急度　→ 🏃</span>
+          ${all.map((t,i)=>matrixTaskHtml(t,i)).join('')}
+        </div>
+        <div class="matrix-count">${all.length}</div>
+      </div>`;
+    }
+
+    return controls+toggle+`<section class="panel list-vertical">
+      ${all.map(listRowV18).join('')||'<div class="empty">条件に合うタスクはありません</div>'}
+    </section>`;
+  };
+
+  function openChildAddV18(parent,source=parent){
+    if(!parent||parent.parentId) return;
+    ui.newChildParentId=parent.id;
+    ui.childAddFlowV18=true;
+    ui.draftRecurring=null;
+    ui.radial=false;
+    ui.addTag=source?.tag||parent.tag;
+    ui.draft=newDraft(source?.tag||parent.tag);
+    ui.draft.quad=source?.quad||parent.quad;
+    ui.modal='add';
+    render();
+    requestAnimationFrame(()=>$('#content')?.focus());
+  }
+
+  function createParentAndOpenChildV18(){
+    const d=ui.draft;
+    if(!d||!String(d.content||'').trim()){
+      showSnackV18('親タスクのタイトルを入力してください');
+      return;
+    }
+    if(ui.draftRecurring){
+      showSnackV18('定期タスクは親にできないため、定期を解除してから子タスクを追加してください');
+      return;
+    }
+
+    const deadline=parseRawDate(d.dateRaw,d.year);
+    const pts=estimatePoints(d.content);
+    const parent=task(
+      d.content.trim(),
+      d.tag,
+      d.quad,
+      deadline,
+      d.timeRaw,
+      '',
+      pts,
+      estimateMinutes(d.content,pts)
+    );
+    parent.memo='';
+    parent.planDate='';
+    parent.planTime='';
+    state.tasks.unshift(parent);
+    save();
+    openChildAddV18(parent,parent);
+  }
+
+  // Add creation-flow buttons to the task-add sheet.
+  const addModalBeforeV18=addModal;
+  addModal=function(){
+    let html=addModalBeforeV18();
+    const parent=ui.newChildParentId?taskByIdV18(ui.newChildParentId):null;
+
+    if(parent){
+      html=html.replace(
+        '<div class="sheet-actions">',
+        '<button id="saveAndAddNextChild" class="continue-child-v18">✓ 保存して次の子タスクを追加</button><div class="sheet-actions">'
+      );
+    }else{
+      html=html.replace(
+        '<div class="sheet-actions">',
+        '<button id="createParentAndChild" class="add-child-flow-v18">＋ このタスクを親にして子タスクを追加</button><div class="sheet-actions">'
+      );
+    }
+    return html;
+  };
+
+  const bindAddBeforeV18=bindAdd;
+  bindAdd=function(){
+    bindAddBeforeV18();
+
+    if($('#createParentAndChild')){
+      $('#createParentAndChild').onclick=createParentAndOpenChildV18;
+    }
+    if($('#saveAndAddNextChild')){
+      $('#saveAndAddNextChild').onclick=()=>saveDraft(true);
+    }
+  };
+
+  // Detail deadline: direct date picker + explicit "なし".
+  const detailModalBeforeV18=detailModal;
+  detailModal=function(){
+    const t=taskByIdV18(ui.detailId);
+    const holder=document.createElement('div');
+    holder.innerHTML=detailModalBeforeV18();
+    if(!t) return holder.innerHTML;
+
+    const sheet=holder.querySelector('.sheet');
+    if(t.recurrence?.type==='daily') sheet?.classList.add('daily-no-plan-v18');
+
+    // Keep the controls in the DOM so older binders stay safe, but hide the whole block.
+    if(t.recurrence?.type==='daily'){
+      const plan=holder.querySelector('.plan-caption')?.closest('.detail-section');
+      if(plan) plan.classList.add('plan-hidden-daily-v18');
+    }
+
+    const oldDate=holder.querySelector('#detailDeadline');
+    if(oldDate){
+      const input=document.createElement('input');
+      input.type='date';
+      input.id='deadlineDateInputV18';
+      input.className='deadline-date-input-v18';
+      input.value=t.deadline||'';
+      oldDate.replaceWith(input);
+
+      const none=document.createElement('button');
+      none.type='button';
+      none.id='deadlineNoneV18';
+      none.className='deadline-none-v18 '+(!t.deadline?'active':'');
+      none.textContent='締切なし';
+      input.insertAdjacentElement('afterend',none);
+    }
+
+    return holder.innerHTML;
+  };
+
+  const bindDetailBeforeV18=bindDetail;
+  bindDetail=function(){
+    bindDetailBeforeV18();
+    const t=taskByIdV18(ui.detailId);
+    if(!t) return;
+
+    const dateInput=$('#deadlineDateInputV18');
+    if(dateInput){
+      dateInput.onchange=e=>{
+        t.deadline=e.target.value||'';
+        if(!t.deadline) t.deadlineTime='';
+        save();
+        render();
+      };
+    }
+
+    if($('#deadlineNoneV18')){
+      $('#deadlineNoneV18').onclick=()=>{
+        t.deadline='';
+        t.deadlineTime='';
+        save();
+        render();
+      };
+    }
+  };
+
+  // Add a third option when the final child is completed.
+  const modalHtmlBeforeV18=modalHtml;
+  modalHtml=function(){
+    let html=modalHtmlBeforeV18();
+    if(ui.modal==='parentDone'){
+      html=html.replace(
+        '<button id="completeParentNo" class="ghost">まだ完了しない</button>',
+        '<button id="addAnotherChildFromDoneV18" class="add-child-again-v18">＋ 新しく子タスクを追加</button><button id="completeParentNo" class="ghost">まだ完了しない</button>'
+      );
+    }
+    return html;
+  };
+
+  const bindModalBeforeV18=bindModal;
+  bindModal=function(){
+    bindModalBeforeV18();
+
+    if(ui.modal==='parentDone'&&$('#addAnotherChildFromDoneV18')){
+      $('#addAnotherChildFromDoneV18').onclick=()=>{
+        const parent=taskByIdV18(ui.parentCompleteId);
+        ui.parentCompleteId=null;
+        if(parent) openChildAddV18(parent,parent);
+      };
+    }
+  };
+
+  // Make list filter buttons follow the requested OR/include semantics.
+  const bindBeforeV18=bind;
+  bind=function(){
+    bindBeforeV18();
+
+    $$('[data-periodic-filter]').forEach(btn=>{
+      btn.onclick=()=>{
+        ui.listPeriodicOnlyV16=!ui.listPeriodicOnlyV16;
+        try{localStorage.setItem('taskCityListPeriodicFilterV1',ui.listPeriodicOnlyV16?'1':'0')}catch(e){}
+        render();
+      };
+    });
+
+    $$('[data-tag-filter-all]').forEach(btn=>{
+      btn.onclick=()=>{
+        const ids=Object.keys(TAGS);
+        const hidden=hiddenTagsV18();
+        const allOn=ids.every(k=>!hidden.has(k));
+        ui.todayHiddenTags=allOn?ids:[];
+        saveHiddenTagsV18();
+        render();
+      };
+    });
+  };
+
+  render();
+  console.info(`[Task City] patch ${PATCH_VERSION_V18} loaded`);
+})();
